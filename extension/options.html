@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>ura settings</title>
+    <link rel="stylesheet" href="options.css">
+  </head>
+  <body>
+    <main>
+      <form id="settings-form">
+        <label>
+          Receiver URL
+          <input id="receiver-url" name="receiverUrl" type="url" required>
+        </label>
+
+        <label>
+          Token
+          <input id="token" name="token" type="password" required>
+        </label>
+
+        <label>
+          Default action
+          <select id="default-action" name="defaultAction">
+            <option value="play">Play</option>
+            <option value="enqueue">Enqueue</option>
+          </select>
+        </label>
+
+        <button type="submit">Save</button>
+        <p id="status" role="status"></p>
+      </form>
+    </main>
+    <script src="options.js"></script>
+  </body>
+</html>

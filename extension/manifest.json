@@ -1,0 +1,25 @@
+{
+  "manifest_version": 2,
+  "name": "ura",
+  "version": "0.1.0",
+  "description": "Send the current tab URL to an ura receiver.",
+  "permissions": [
+    "activeTab",
+    "storage",
+    "notifications",
+    "http://*/*",
+    "https://*/*"
+  ],
+  "browser_action": {
+    "default_title": "Send to ura"
+  },
+  "background": {
+    "scripts": [
+      "background.js"
+    ]
+  },
+  "options_ui": {
+    "page": "options.html",
+    "browser_style": true
+  }
+}

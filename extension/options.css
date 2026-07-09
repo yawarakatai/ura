@@ -1,0 +1,30 @@
+body {
+  font: menu;
+  margin: 0;
+}
+
+main {
+  max-width: 36rem;
+  padding: 1rem;
+}
+
+form {
+  display: grid;
+  gap: 0.875rem;
+}
+
+label {
+  display: grid;
+  gap: 0.25rem;
+}
+
+input,
+select,
+button {
+  font: inherit;
+}
+
+#status {
+  min-height: 1.2em;
+  margin: 0;
+}
