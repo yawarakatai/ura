@@ -201,6 +201,11 @@ impl HttpResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        thread,
+    };
 
     #[test]
     fn parses_receiver_base_url() {
@@ -235,5 +240,149 @@ mod tests {
                 body: "{\"ok\":true}".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn play_uses_http_api() {
+        let request = capture_request(r#"{"ok":true}"#, |client| {
+            client.play("https://youtu.be/example")
+        });
+
+        assert_request_line(&request, "POST /v1/play HTTP/1.1");
+        assert_authorization_header(&request);
+        assert!(request.contains(r#""url":"https://youtu.be/example""#));
+        assert!(request.contains(r#""source":"cli""#));
+    }
+
+    #[test]
+    fn enqueue_uses_http_api() {
+        let request = capture_request(r#"{"ok":true}"#, |client| {
+            client.enqueue("https://youtu.be/example")
+        });
+
+        assert_request_line(&request, "POST /v1/enqueue HTTP/1.1");
+        assert_authorization_header(&request);
+        assert!(request.contains(r#""url":"https://youtu.be/example""#));
+        assert!(request.contains(r#""source":"cli""#));
+    }
+
+    #[test]
+    fn control_commands_use_http_api() {
+        for command in ["toggle", "stop", "loop-off", "loop-one", "loop-queue"] {
+            let request = capture_request(r#"{"ok":true,"loop_status":null}"#, |client| {
+                client.control(command)
+            });
+
+            assert_request_line(&request, "POST /v1/control HTTP/1.1");
+            assert_authorization_header(&request);
+            assert!(request.contains(&format!(r#""command":"{command}""#)));
+        }
+    }
+
+    #[test]
+    fn loop_status_uses_http_api() {
+        let request = capture_request(r#"{"ok":true,"loop_status":"Off"}"#, |client| {
+            client.loop_status()
+        });
+
+        assert_request_line(&request, "POST /v1/control HTTP/1.1");
+        assert_authorization_header(&request);
+        assert!(request.contains(r#""command":"loop-status""#));
+    }
+
+    #[test]
+    fn status_uses_http_api() {
+        let request = capture_request(
+            r#"{"pause":false,"idle_active":true,"path":null}"#,
+            |client| client.status(),
+        );
+
+        assert_request_line(&request, "GET /v1/status HTTP/1.1");
+        assert_authorization_header(&request);
+    }
+
+    #[test]
+    fn history_uses_http_api() {
+        let request = capture_request("[]", |client| client.history());
+
+        assert_request_line(&request, "GET /v1/history HTTP/1.1");
+        assert_authorization_header(&request);
+    }
+
+    fn capture_request<T, F>(response_body: &str, send: F) -> String
+    where
+        F: FnOnce(&HttpClient) -> Result<T>,
+    {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test receiver");
+        let address = listener.local_addr().expect("read test receiver address");
+        let response_body = response_body.to_string();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept client request");
+            let request = read_http_request(&mut stream);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("write test response");
+            request
+        });
+
+        let client = HttpClient::new(
+            format!("http://{address}"),
+            "0123456789abcdef0123456789abcdef".to_string(),
+        )
+        .expect("create client");
+        send(&client).expect("send client request");
+        handle.join().expect("join test receiver")
+    }
+
+    fn read_http_request(stream: &mut std::net::TcpStream) -> String {
+        let mut request = Vec::new();
+        let mut buffer = [0; 512];
+
+        loop {
+            let read = stream.read(&mut buffer).expect("read request");
+            assert!(
+                read > 0,
+                "client closed connection before request completed"
+            );
+            request.extend_from_slice(&buffer[..read]);
+
+            if let Some(header_end) = header_end(&request) {
+                let headers = String::from_utf8_lossy(&request[..header_end]);
+                let content_length = content_length(&headers);
+                if request.len() >= header_end + 4 + content_length {
+                    break;
+                }
+            }
+        }
+
+        String::from_utf8(request).expect("request should be UTF-8")
+    }
+
+    fn header_end(request: &[u8]) -> Option<usize> {
+        request.windows(4).position(|window| window == b"\r\n\r\n")
+    }
+
+    fn content_length(headers: &str) -> usize {
+        headers
+            .lines()
+            .find_map(|line| line.strip_prefix("Content-Length: "))
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0)
+    }
+
+    fn assert_request_line(request: &str, expected: &str) {
+        assert!(
+            request.starts_with(expected),
+            "expected request line `{expected}`, got:\n{request}"
+        );
+    }
+
+    fn assert_authorization_header(request: &str) {
+        assert!(request.contains("Authorization: Bearer 0123456789abcdef0123456789abcdef\r\n"));
     }
 }

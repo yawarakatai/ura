@@ -43,7 +43,12 @@ impl Database {
         &self.path
     }
 
-    pub fn record_play(&self, url: &str, source: Option<&str>) -> Result<()> {
+    pub fn record_play(
+        &self,
+        source_url: &str,
+        play_url: &str,
+        source: Option<&str>,
+    ) -> Result<()> {
         let mut conn = self.connect()?;
         let now = now_text();
         let tx = conn.transaction()?;
@@ -55,19 +60,19 @@ impl Database {
                 play_url,
                 created_at
             ) VALUES (?1, ?2, ?3, ?4)",
-            params!["url", url, url, now],
+            params!["url", source_url, play_url, now],
         )?;
         tx.execute(
             "UPDATE tracks
              SET play_count = play_count + 1,
                  last_played_at = ?1
              WHERE source_url = ?2",
-            params![now, url],
+            params![now, source_url],
         )?;
 
         let track_id: i64 = tx.query_row(
             "SELECT id FROM tracks WHERE source_url = ?1",
-            params![url],
+            params![source_url],
             |row| row.get(0),
         )?;
         tx.execute(
@@ -177,7 +182,11 @@ mod tests {
         let database = Database::open(path.clone()).expect("open database");
 
         database
-            .record_play("https://youtu.be/example", Some("cli"))
+            .record_play(
+                "https://youtu.be/example",
+                "https://youtu.be/example",
+                Some("cli"),
+            )
             .expect("record play");
 
         let history = database.history().expect("read history");
@@ -195,15 +204,50 @@ mod tests {
         let database = Database::open(path.clone()).expect("open database");
 
         database
-            .record_play("https://youtu.be/example", Some("cli"))
+            .record_play(
+                "https://youtu.be/example",
+                "https://youtu.be/example",
+                Some("cli"),
+            )
             .expect("record first play");
         database
-            .record_play("https://youtu.be/example", Some("cli"))
+            .record_play(
+                "https://youtu.be/example",
+                "https://youtu.be/example",
+                Some("cli"),
+            )
             .expect("record second play");
 
         let history = database.history().expect("read history");
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].play_count, 2);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn stores_source_and_play_urls_separately() {
+        let path = unique_db_path("source-play");
+        let database = Database::open(path.clone()).expect("open database");
+
+        database
+            .record_play(
+                "https://www.youtube.com/watch?v=example&list=playlist",
+                "https://www.youtube.com/watch?v=example",
+                Some("cli"),
+            )
+            .expect("record play");
+
+        let history = database.history().expect("read history");
+        assert_eq!(history.len(), 1);
+        assert_eq!(
+            history[0].source_url,
+            "https://www.youtube.com/watch?v=example&list=playlist"
+        );
+        assert_eq!(
+            history[0].play_url,
+            "https://www.youtube.com/watch?v=example"
+        );
 
         let _ = fs::remove_file(path);
     }

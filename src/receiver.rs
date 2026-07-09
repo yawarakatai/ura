@@ -1,6 +1,8 @@
 use std::{
     fs,
+    io::ErrorKind,
     net::SocketAddr,
+    os::unix::{fs::FileTypeExt, net::UnixStream},
     path::{Path, PathBuf},
     process::{Command as StdCommand, ExitStatus, Stdio},
     sync::Arc,
@@ -9,19 +11,26 @@ use std::{
 use anyhow::{Context, Result as AnyhowResult};
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{Request, State},
     http::{HeaderMap, StatusCode},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
-use tokio::{net::TcpListener, process::Command as TokioCommand};
+use tokio::{
+    net::TcpListener,
+    process::{Child, Command as TokioCommand},
+    sync::oneshot,
+    task::JoinHandle,
+};
 
 use crate::config::{default_db_path, default_mpv_socket_path};
 use crate::db::{Database, HistoryEntry};
 use crate::mpv::{LoopMode, LoopStatus, MpvClient};
 
 pub async fn run_receive(bind: SocketAddr, token: String) -> AnyhowResult<()> {
+    validate_receiver_token(&token)?;
     ensure_program_in_path("mpv")?;
     ensure_program_in_path("yt-dlp")?;
 
@@ -29,24 +38,44 @@ pub async fn run_receive(bind: SocketAddr, token: String) -> AnyhowResult<()> {
     create_runtime_dir(&socket_path)?;
     let database = Database::open(default_db_path()?)?;
 
-    let mut receiver = Receiver::start(socket_path)?;
+    let receiver = Receiver::start(socket_path)?;
+    let (socket_path, mut mpv_shutdown, mut mpv_task) = receiver.into_parts();
     println!(
         "receive: mpv started with IPC socket at {}; HTTP API listening on http://{}",
-        receiver.socket_path.display(),
+        socket_path.display(),
         bind
     );
 
-    let api = run_api(bind, token, receiver.socket_path.clone(), database);
+    let (api_shutdown, api_shutdown_rx) = oneshot::channel();
+    let mut api_shutdown = Some(api_shutdown);
+    let mut api_task = tokio::spawn(run_api(bind, token, socket_path, database, api_shutdown_rx));
+
     tokio::select! {
-        result = receiver.wait() => {
-            let status = result?;
-            if status.success() {
-                Ok(())
-            } else {
-                Err(anyhow::anyhow!("mpv exited with status {status}"))
-            }
+        result = &mut mpv_task => {
+            let status = task_result(result, "mpv supervision")?;
+            signal_shutdown(&mut api_shutdown);
+            await_task(api_task, "HTTP receiver").await?;
+            exit_status_result(status)
         }
-        result = api => result,
+        result = &mut api_task => {
+            let api_result = task_result(result, "HTTP receiver");
+            signal_shutdown(&mut mpv_shutdown);
+            let mpv_result = await_task(mpv_task, "mpv supervision").await;
+            api_result?;
+            mpv_result?;
+            Ok(())
+        }
+        result = tokio::signal::ctrl_c() => {
+            let ctrl_c_result = result.with_context(|| "failed to listen for Ctrl+C");
+            signal_shutdown(&mut api_shutdown);
+            signal_shutdown(&mut mpv_shutdown);
+            let mpv_result = await_task(mpv_task, "mpv supervision").await;
+            let api_result = await_task(api_task, "HTTP receiver").await;
+            ctrl_c_result?;
+            mpv_result?;
+            api_result?;
+            Ok(())
+        }
     }
 }
 
@@ -55,6 +84,7 @@ async fn run_api(
     token: String,
     socket_path: PathBuf,
     database: Database,
+    shutdown: oneshot::Receiver<()>,
 ) -> AnyhowResult<()> {
     let state = AppState {
         token: Arc::from(token),
@@ -68,19 +98,21 @@ async fn run_api(
 
     axum::serve(listener, app)
         .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
+            let _ = shutdown.await;
         })
         .await
         .with_context(|| "HTTP receiver failed")
 }
 
 fn app(state: AppState) -> Router {
+    let auth_state = state.clone();
     Router::new()
         .route("/v1/play", post(play))
         .route("/v1/enqueue", post(enqueue))
         .route("/v1/control", post(control))
         .route("/v1/status", get(status))
         .route("/v1/history", get(history))
+        .route_layer(middleware::from_fn_with_state(auth_state, require_auth))
         .with_state(state)
 }
 
@@ -147,48 +179,42 @@ impl IntoResponse for AppError {
 
 async fn play(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Json(request): Json<PlayRequest>,
 ) -> std::result::Result<Json<OkResponse>, AppError> {
-    authorize(&headers, &state)?;
-    validate_supported_url(&request.url)?;
-    let url = request.url;
+    let play_url = validate_supported_url(&request.url)?;
+    let source_url = request.url;
     let source = request.source;
 
     run_mpv_command(state.clone(), {
-        let url = url.clone();
-        move |client| client.load_replace(&url)
+        let play_url = play_url.clone();
+        move |client| client.load_replace(&play_url)
     })
     .await?;
-    record_history(state, url, source).await?;
+    record_history(state, source_url, play_url, source).await?;
     Ok(Json(OkResponse { ok: true }))
 }
 
 async fn enqueue(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Json(request): Json<PlayRequest>,
 ) -> std::result::Result<Json<OkResponse>, AppError> {
-    authorize(&headers, &state)?;
-    validate_supported_url(&request.url)?;
-    let url = request.url;
+    let play_url = validate_supported_url(&request.url)?;
+    let source_url = request.url;
     let source = request.source;
 
     run_mpv_command(state.clone(), {
-        let url = url.clone();
-        move |client| client.load_enqueue(&url)
+        let play_url = play_url.clone();
+        move |client| client.load_enqueue(&play_url)
     })
     .await?;
-    record_history(state, url, source).await?;
+    record_history(state, source_url, play_url, source).await?;
     Ok(Json(OkResponse { ok: true }))
 }
 
 async fn control(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Json(request): Json<ControlRequest>,
 ) -> std::result::Result<Json<ControlResponse>, AppError> {
-    authorize(&headers, &state)?;
     let command = request.command;
 
     let loop_status = match command.as_str() {
@@ -225,20 +251,26 @@ async fn control(
 
 async fn status(
     State(state): State<AppState>,
-    headers: HeaderMap,
 ) -> std::result::Result<Json<crate::mpv::MpvStatus>, AppError> {
-    authorize(&headers, &state)?;
     let status = run_mpv_command(state, |client| client.status()).await?;
     Ok(Json(status))
 }
 
 async fn history(
     State(state): State<AppState>,
-    headers: HeaderMap,
 ) -> std::result::Result<Json<Vec<HistoryEntry>>, AppError> {
-    authorize(&headers, &state)?;
     let history = run_db_command(state, |database| database.history()).await?;
     Ok(Json(history))
+}
+
+async fn require_auth(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    request: Request,
+    next: Next,
+) -> std::result::Result<Response, AppError> {
+    authorize(&headers, &state)?;
+    Ok(next.run(request).await)
 }
 
 async fn run_mpv_command<T, F>(state: AppState, command: F) -> std::result::Result<T, AppError>
@@ -257,11 +289,12 @@ where
 
 async fn record_history(
     state: AppState,
-    url: String,
+    source_url: String,
+    play_url: String,
     source: Option<String>,
 ) -> std::result::Result<(), AppError> {
     run_db_command(state, move |database| {
-        database.record_play(&url, source.as_deref())
+        database.record_play(&source_url, &play_url, source.as_deref())
     })
     .await
 }
@@ -296,7 +329,26 @@ fn authorize(headers: &HeaderMap, state: &AppState) -> std::result::Result<(), A
     }
 }
 
-fn validate_supported_url(url: &str) -> std::result::Result<(), AppError> {
+fn validate_receiver_token(token: &str) -> AnyhowResult<()> {
+    let token = token.trim();
+    if token.is_empty() {
+        return Err(anyhow::anyhow!("receiver token must not be empty"));
+    }
+    if token == "change-me" {
+        return Err(anyhow::anyhow!(
+            "receiver token must be changed before starting the receiver"
+        ));
+    }
+    if token.len() < 32 {
+        return Err(anyhow::anyhow!(
+            "receiver token must be at least 32 characters"
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_supported_url(url: &str) -> std::result::Result<String, AppError> {
     let Some(parsed) = ParsedUrl::parse(url) else {
         Err(AppError::new(
             StatusCode::BAD_REQUEST,
@@ -304,34 +356,37 @@ fn validate_supported_url(url: &str) -> std::result::Result<(), AppError> {
         ))?
     };
 
-    if parsed.has_playlist() {
+    if parsed.is_supported_youtube_video_url() {
+        return Ok(parsed.without_playlist_context());
+    }
+
+    if parsed.has_playlist_context() {
         return Err(AppError::new(
             StatusCode::BAD_REQUEST,
             "playlist URLs are not supported in the MVP",
         ));
     }
 
-    if parsed.is_supported_youtube_url() {
-        Ok(())
-    } else {
-        Err(AppError::new(
-            StatusCode::BAD_REQUEST,
-            "unsupported URL; expected youtube.com, music.youtube.com, or youtu.be",
-        ))
-    }
+    Err(AppError::new(
+        StatusCode::BAD_REQUEST,
+        "unsupported URL; expected youtube.com, music.youtube.com, or youtu.be",
+    ))
 }
 
 #[derive(Debug, PartialEq, Eq)]
 struct ParsedUrl {
+    scheme: String,
+    authority: String,
     host: String,
     path: String,
     query: Option<String>,
+    fragment: Option<String>,
 }
 
 impl ParsedUrl {
     fn parse(url: &str) -> Option<Self> {
         let url = url.trim();
-        if url.is_empty() {
+        if url.is_empty() || url.chars().any(char::is_whitespace) {
             return None;
         }
 
@@ -341,6 +396,10 @@ impl ParsedUrl {
             return None;
         }
 
+        let (rest, fragment) = match rest.split_once('#') {
+            Some((rest, fragment)) => (rest, Some(fragment.to_string())),
+            None => (rest, None),
+        };
         let (authority, path_and_query) = match rest.split_once('/') {
             Some((authority, path_and_query)) => (authority, format!("/{path_and_query}")),
             None => (rest, "/".to_string()),
@@ -349,74 +408,227 @@ impl ParsedUrl {
             return None;
         }
 
-        let host = authority
-            .rsplit('@')
-            .next()
-            .unwrap_or(authority)
-            .split(':')
-            .next()
-            .unwrap_or(authority)
-            .to_ascii_lowercase();
+        let host = authority.parse::<Authority>().ok()?.host;
         let (path, query) = match path_and_query.split_once('?') {
             Some((path, query)) => (path.to_string(), Some(query.to_string())),
             None => (path_and_query, None),
         };
 
-        Some(Self { host, path, query })
+        Some(Self {
+            scheme,
+            authority: authority.to_string(),
+            host,
+            path,
+            query,
+            fragment,
+        })
     }
 
-    fn is_supported_youtube_url(&self) -> bool {
+    fn is_supported_youtube_video_url(&self) -> bool {
         match self.host.as_str() {
-            "youtube.com" | "www.youtube.com" | "music.youtube.com" => self.path == "/watch",
+            "youtube.com" | "www.youtube.com" | "music.youtube.com" => {
+                self.path == "/watch" && self.has_non_empty_query_param("v")
+            }
             "youtu.be" => !self.path.trim_start_matches('/').is_empty(),
             _ => false,
         }
     }
 
-    fn has_playlist(&self) -> bool {
-        self.path == "/playlist"
-            || self
-                .query
-                .as_deref()
-                .map(|query| {
-                    query.split('&').any(|part| {
-                        part.split_once('=')
-                            .map(|(name, _)| name == "list")
-                            .unwrap_or(part == "list")
-                    })
+    fn has_playlist_context(&self) -> bool {
+        self.path == "/playlist" || self.has_query_param("list")
+    }
+
+    fn has_query_param(&self, name: &str) -> bool {
+        self.query
+            .as_deref()
+            .map(|query| query.split('&').any(|part| query_param_name(part) == name))
+            .unwrap_or(false)
+    }
+
+    fn has_non_empty_query_param(&self, name: &str) -> bool {
+        self.query
+            .as_deref()
+            .map(|query| {
+                query.split('&').any(|part| {
+                    part.split_once('=')
+                        .map(|(param_name, value)| param_name == name && !value.is_empty())
+                        .unwrap_or(false)
                 })
-                .unwrap_or(false)
+            })
+            .unwrap_or(false)
+    }
+
+    fn without_playlist_context(&self) -> String {
+        let query = self.query_without_param("list");
+        let mut url = format!("{}://{}{}", self.scheme, self.authority, self.path);
+
+        if let Some(query) = query {
+            url.push('?');
+            url.push_str(&query);
+        }
+
+        if let Some(fragment) = &self.fragment {
+            url.push('#');
+            url.push_str(fragment);
+        }
+
+        url
+    }
+
+    fn query_without_param(&self, name: &str) -> Option<String> {
+        self.query
+            .as_deref()
+            .map(|query| {
+                query
+                    .split('&')
+                    .filter(|part| query_param_name(part) != name)
+                    .collect::<Vec<_>>()
+                    .join("&")
+            })
+            .filter(|query| !query.is_empty())
+    }
+}
+
+struct Authority {
+    host: String,
+}
+
+impl std::str::FromStr for Authority {
+    type Err = ();
+
+    fn from_str(authority: &str) -> std::result::Result<Self, Self::Err> {
+        if authority.contains('@') {
+            return Err(());
+        }
+
+        let (host, port) = match authority.split_once(':') {
+            Some((host, port)) => (host, Some(port)),
+            None => (authority, None),
+        };
+        if host.is_empty()
+            || host
+                .chars()
+                .any(|ch| !(ch.is_ascii_alphanumeric() || ch == '.' || ch == '-'))
+        {
+            return Err(());
+        }
+
+        if let Some(port) = port {
+            let parsed = port.parse::<u16>().map_err(|_| ())?;
+            if parsed == 0 {
+                return Err(());
+            }
+        }
+
+        Ok(Self {
+            host: host.to_ascii_lowercase(),
+        })
+    }
+}
+
+fn query_param_name(part: &str) -> &str {
+    part.split_once('=').map(|(name, _)| name).unwrap_or(part)
+}
+
+async fn supervise_mpv_child(
+    mut mpv: Child,
+    mut shutdown: oneshot::Receiver<()>,
+) -> AnyhowResult<ExitStatus> {
+    tokio::select! {
+        result = mpv.wait() => {
+            result.with_context(|| "failed to wait for mpv child process")
+        }
+        _ = &mut shutdown => {
+            terminate_mpv_child(&mut mpv).await
+        }
+    }
+}
+
+async fn terminate_mpv_child(mpv: &mut Child) -> AnyhowResult<ExitStatus> {
+    if let Some(status) = mpv
+        .try_wait()
+        .with_context(|| "failed to check mpv child process status")?
+    {
+        return Ok(status);
+    }
+
+    mpv.start_kill()
+        .with_context(|| "failed to terminate mpv child process")?;
+    mpv.wait()
+        .await
+        .with_context(|| "failed to wait for mpv child process after termination")
+}
+
+fn signal_shutdown(shutdown: &mut Option<oneshot::Sender<()>>) {
+    if let Some(shutdown) = shutdown.take() {
+        let _ = shutdown.send(());
+    }
+}
+
+async fn await_task<T>(task: JoinHandle<AnyhowResult<T>>, task_name: &str) -> AnyhowResult<T> {
+    task_result(task.await, task_name)
+}
+
+fn task_result<T>(
+    result: std::result::Result<AnyhowResult<T>, tokio::task::JoinError>,
+    task_name: &str,
+) -> AnyhowResult<T> {
+    result.with_context(|| format!("{task_name} task failed"))?
+}
+
+fn exit_status_result(status: ExitStatus) -> AnyhowResult<()> {
+    if status.success() {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!("mpv exited with status {status}"))
     }
 }
 
 struct Receiver {
-    mpv: tokio::process::Child,
     socket_path: PathBuf,
+    shutdown: Option<oneshot::Sender<()>>,
+    task: Option<JoinHandle<AnyhowResult<ExitStatus>>>,
 }
 
 impl Receiver {
     fn start(socket_path: PathBuf) -> AnyhowResult<Self> {
+        prepare_mpv_socket_path(&socket_path)?;
         let mpv = TokioCommand::new("mpv")
             .args(mpv_args(&socket_path))
             .stdin(Stdio::null())
             .spawn()
             .with_context(|| "failed to start mpv")?;
+        let (shutdown, shutdown_rx) = oneshot::channel();
+        let task = tokio::spawn(supervise_mpv_child(mpv, shutdown_rx));
 
-        Ok(Self { mpv, socket_path })
+        Ok(Self {
+            socket_path,
+            shutdown: Some(shutdown),
+            task: Some(task),
+        })
     }
 
-    async fn wait(&mut self) -> AnyhowResult<ExitStatus> {
-        self.mpv
-            .wait()
-            .await
-            .with_context(|| "failed to wait for mpv child process")
+    fn into_parts(
+        mut self,
+    ) -> (
+        PathBuf,
+        Option<oneshot::Sender<()>>,
+        JoinHandle<AnyhowResult<ExitStatus>>,
+    ) {
+        let socket_path = std::mem::take(&mut self.socket_path);
+        let shutdown = self.shutdown.take();
+        let task = self
+            .task
+            .take()
+            .expect("receiver process task should exist");
+        (socket_path, shutdown, task)
     }
 }
 
 impl Drop for Receiver {
     fn drop(&mut self) {
-        if let Ok(None) = self.mpv.try_wait() {
-            let _ = self.mpv.start_kill();
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
         }
     }
 }
@@ -431,6 +643,51 @@ fn create_runtime_dir(socket_path: &Path) -> AnyhowResult<()> {
             runtime_dir.display()
         )
     })
+}
+
+fn prepare_mpv_socket_path(socket_path: &Path) -> AnyhowResult<()> {
+    let metadata = match fs::symlink_metadata(socket_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "failed to inspect mpv IPC socket path {}",
+                    socket_path.display()
+                )
+            });
+        }
+    };
+
+    if !metadata.file_type().is_socket() {
+        return Err(anyhow::anyhow!(
+            "mpv IPC socket path {} exists but is not a Unix socket",
+            socket_path.display()
+        ));
+    }
+
+    match UnixStream::connect(socket_path) {
+        Ok(_) => Err(anyhow::anyhow!(
+            "mpv IPC socket {} is already in use; stop the existing receiver before starting a new one",
+            socket_path.display()
+        )),
+        Err(error) if error.kind() == ErrorKind::ConnectionRefused => {
+            fs::remove_file(socket_path).with_context(|| {
+                format!(
+                    "failed to remove stale mpv IPC socket {}",
+                    socket_path.display()
+                )
+            })?;
+            Ok(())
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| {
+            format!(
+                "failed to connect to existing mpv IPC socket {}",
+                socket_path.display()
+            )
+        }),
+    }
 }
 
 fn ensure_program_in_path(program: &str) -> AnyhowResult<()> {
@@ -466,6 +723,10 @@ fn mpv_args(socket_path: &Path) -> Vec<String> {
 mod tests {
     use super::*;
     use axum::http::{HeaderMap, HeaderValue, header::AUTHORIZATION};
+    use std::{
+        io::{Read, Write},
+        os::unix::net::UnixListener,
+    };
 
     fn unique_path(name: &str) -> PathBuf {
         let nanos = std::time::SystemTime::now()
@@ -478,7 +739,7 @@ mod tests {
     fn test_state() -> (AppState, PathBuf) {
         let db_path = unique_path("receiver-history.db");
         let state = AppState {
-            token: Arc::from("secret"),
+            token: Arc::from("0123456789abcdef0123456789abcdef"),
             socket_path: Arc::new(PathBuf::from("/tmp/ura.sock")),
             database: Arc::new(Database::open(db_path.clone()).expect("open test database")),
         };
@@ -518,7 +779,10 @@ mod tests {
     fn accepts_valid_bearer_token() {
         let (state, db_path) = test_state();
         let mut headers = HeaderMap::new();
-        headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer secret"));
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_static("Bearer 0123456789abcdef0123456789abcdef"),
+        );
 
         authorize(&headers, &state).expect("valid token should pass");
 
@@ -549,30 +813,109 @@ mod tests {
         let _ = fs::remove_file(db_path);
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn v1_endpoints_require_bearer_auth_before_body_parsing() {
+        let (state, db_path) = test_state();
+        let server = TestServer::start(state).await;
+
+        for request in [
+            "POST /v1/play HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            "POST /v1/enqueue HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            "POST /v1/control HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            "GET /v1/status HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            "GET /v1/history HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        ] {
+            let response = server.request(request).await;
+            assert!(
+                response.starts_with("HTTP/1.1 401"),
+                "expected 401 for request:\n{request}\nresponse:\n{response}"
+            );
+        }
+
+        let invalid = server
+            .request(
+                "GET /v1/history HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer wrong\r\nConnection: close\r\n\r\n",
+            )
+            .await;
+        assert!(
+            invalid.starts_with("HTTP/1.1 401"),
+            "expected 401 for invalid token, got:\n{invalid}"
+        );
+
+        let query_token = server
+            .request(
+                "GET /v1/history?token=0123456789abcdef0123456789abcdef HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            )
+            .await;
+        assert!(
+            query_token.starts_with("HTTP/1.1 401"),
+            "expected 401 for query-string token, got:\n{query_token}"
+        );
+
+        let _ = fs::remove_file(db_path);
+    }
+
     #[test]
     fn accepts_supported_youtube_urls() {
-        validate_supported_url("https://www.youtube.com/watch?v=example")
-            .expect("www youtube watch URL should pass");
-        validate_supported_url("https://youtube.com/watch?v=example")
-            .expect("youtube watch URL should pass");
-        validate_supported_url("https://music.youtube.com/watch?v=example")
-            .expect("music youtube watch URL should pass");
-        validate_supported_url("https://youtu.be/example").expect("https should pass");
+        assert_eq!(
+            validate_supported_url("https://www.youtube.com/watch?v=example")
+                .expect("www youtube watch URL should pass"),
+            "https://www.youtube.com/watch?v=example"
+        );
+        assert_eq!(
+            validate_supported_url("https://youtube.com/watch?v=example")
+                .expect("youtube watch URL should pass"),
+            "https://youtube.com/watch?v=example"
+        );
+        assert_eq!(
+            validate_supported_url("https://music.youtube.com/watch?v=example")
+                .expect("music youtube watch URL should pass"),
+            "https://music.youtube.com/watch?v=example"
+        );
+        assert_eq!(
+            validate_supported_url("https://youtu.be/example").expect("https should pass"),
+            "https://youtu.be/example"
+        );
+    }
+
+    #[test]
+    fn strips_playlist_context_from_watch_urls() {
+        assert_eq!(
+            validate_supported_url("https://www.youtube.com/watch?v=example&list=playlist")
+                .expect("watch URL with playlist context should pass"),
+            "https://www.youtube.com/watch?v=example"
+        );
+        assert_eq!(
+            validate_supported_url(
+                "https://music.youtube.com/watch?v=example&list=playlist&index=2",
+            )
+            .expect("music watch URL with playlist context should pass"),
+            "https://music.youtube.com/watch?v=example&index=2"
+        );
     }
 
     #[test]
     fn rejects_unsafe_url_schemes() {
         let error = validate_supported_url("file:///tmp/audio").expect_err("file URL should fail");
+        let javascript =
+            validate_supported_url("javascript:alert(1)").expect_err("javascript URL should fail");
+        let ftp =
+            validate_supported_url("ftp://example.test/audio").expect_err("ftp URL should fail");
 
         assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(javascript.status, StatusCode::BAD_REQUEST);
+        assert_eq!(ftp.status, StatusCode::BAD_REQUEST);
     }
 
     #[test]
     fn rejects_unsupported_domains() {
         let error =
             validate_supported_url("https://example.test/watch?v=example").expect_err("domain");
+        let evil = validate_supported_url("http://evil.example/watch?v=example")
+            .expect_err("evil domain should fail");
 
         assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(evil.status, StatusCode::BAD_REQUEST);
     }
 
     #[test]
@@ -583,14 +926,128 @@ mod tests {
     }
 
     #[test]
+    fn rejects_malformed_urls() {
+        for url in [
+            "not-a-url",
+            "https://youtube.com:bad/watch?v=example",
+            "https://youtube.com:99999/watch?v=example",
+            "https://user@youtube.com/watch?v=example",
+            "https://youtube.com/watch?v=with space",
+        ] {
+            let error = validate_supported_url(url).expect_err("malformed URL should fail");
+            assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        }
+    }
+
+    #[test]
     fn rejects_playlist_urls() {
-        let watch_playlist =
-            validate_supported_url("https://www.youtube.com/watch?v=example&list=playlist")
-                .expect_err("watch playlist should fail");
         let playlist = validate_supported_url("https://www.youtube.com/playlist?list=playlist")
             .expect_err("playlist should fail");
+        let music_playlist =
+            validate_supported_url("https://music.youtube.com/playlist?list=playlist")
+                .expect_err("music playlist should fail");
 
-        assert_eq!(watch_playlist.status, StatusCode::BAD_REQUEST);
         assert_eq!(playlist.status, StatusCode::BAD_REQUEST);
+        assert_eq!(music_playlist.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn rejects_watch_urls_without_video_ids() {
+        let error = validate_supported_url("https://www.youtube.com/watch?list=playlist")
+            .expect_err("watch URL without video ID should fail");
+
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn rejects_unsafe_receiver_tokens() {
+        assert!(validate_receiver_token("").is_err());
+        assert!(validate_receiver_token("change-me").is_err());
+        assert!(validate_receiver_token("short-token").is_err());
+    }
+
+    #[test]
+    fn accepts_receiver_tokens_with_at_least_32_characters() {
+        validate_receiver_token("0123456789abcdef0123456789abcdef")
+            .expect("32 character token should pass");
+    }
+
+    #[test]
+    fn removes_stale_mpv_socket_before_startup() {
+        let runtime_dir = unique_path("stale-socket");
+        fs::create_dir_all(&runtime_dir).expect("create test runtime dir");
+        let socket_path = runtime_dir.join("mpv.sock");
+        let listener = UnixListener::bind(&socket_path).expect("create stale socket");
+        drop(listener);
+
+        prepare_mpv_socket_path(&socket_path).expect("remove stale socket");
+
+        assert!(!socket_path.exists());
+
+        let _ = fs::remove_dir_all(runtime_dir);
+    }
+
+    #[test]
+    fn rejects_live_mpv_socket_before_startup() {
+        let runtime_dir = unique_path("live-socket");
+        fs::create_dir_all(&runtime_dir).expect("create test runtime dir");
+        let socket_path = runtime_dir.join("mpv.sock");
+        let _listener = UnixListener::bind(&socket_path).expect("create live socket");
+
+        let error =
+            prepare_mpv_socket_path(&socket_path).expect_err("live socket should block startup");
+
+        assert!(error.to_string().contains("already in use"));
+        assert!(socket_path.exists());
+
+        let _ = fs::remove_dir_all(runtime_dir);
+    }
+
+    struct TestServer {
+        address: SocketAddr,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl TestServer {
+        async fn start(state: AppState) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind test HTTP server");
+            let address = listener.local_addr().expect("read test server address");
+            let task = tokio::spawn(async move {
+                axum::serve(listener, app(state))
+                    .await
+                    .expect("run test HTTP server");
+            });
+
+            Self { address, task }
+        }
+
+        async fn request(&self, request: &str) -> String {
+            let address = self.address;
+            let request = request.to_string();
+            tokio::task::spawn_blocking(move || send_raw_http(address, &request))
+                .await
+                .expect("join raw HTTP request task")
+        }
+    }
+
+    impl Drop for TestServer {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    fn send_raw_http(address: SocketAddr, request: &str) -> String {
+        let mut stream = std::net::TcpStream::connect(address).expect("connect test HTTP server");
+        stream
+            .write_all(request.as_bytes())
+            .expect("write raw HTTP request");
+
+        let mut response = String::new();
+        stream
+            .read_to_string(&mut response)
+            .expect("read raw HTTP response");
+        response
     }
 }
