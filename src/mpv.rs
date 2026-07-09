@@ -21,7 +21,7 @@ pub enum LoopMode {
     Queue,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LoopStatus {
     Off,
     One,
@@ -117,7 +117,11 @@ impl MpvClient {
     }
 
     fn get_bool_property(&mut self, name: &str) -> Result<Option<bool>> {
-        let response = self.send_command(json!({ "command": ["get_property", name] }))?;
+        let response = match self.send_command(json!({ "command": ["get_property", name] })) {
+            Ok(response) => response,
+            Err(error) if is_property_unavailable(&error) => return Ok(None),
+            Err(error) => return Err(error),
+        };
         match response.data {
             Some(Value::Bool(value)) => Ok(Some(value)),
             Some(Value::Null) | None => Ok(None),
@@ -126,7 +130,11 @@ impl MpvClient {
     }
 
     fn get_string_property(&mut self, name: &str) -> Result<Option<String>> {
-        let response = self.send_command(json!({ "command": ["get_property", name] }))?;
+        let response = match self.send_command(json!({ "command": ["get_property", name] })) {
+            Ok(response) => response,
+            Err(error) if is_property_unavailable(&error) => return Ok(None),
+            Err(error) => return Err(error),
+        };
         match response.data {
             Some(Value::String(value)) => Ok(Some(value)),
             Some(Value::Null) | None => Ok(None),
@@ -202,6 +210,13 @@ fn parse_response(response: &str) -> Result<MpvResponse> {
     } else {
         Err(UraError::MpvCommandFailed(response.error).into())
     }
+}
+
+fn is_property_unavailable(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<UraError>()
+        .map(|error| matches!(error, UraError::MpvCommandFailed(message) if message == "property unavailable"))
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -295,6 +310,14 @@ mod tests {
             .expect_err("mpv error should fail");
 
         assert!(error.to_string().contains("mpv command failed"));
+    }
+
+    #[test]
+    fn detects_unavailable_property_errors() {
+        let error: anyhow::Error =
+            UraError::MpvCommandFailed("property unavailable".to_string()).into();
+
+        assert!(is_property_unavailable(&error));
     }
 
     #[test]

@@ -2,83 +2,83 @@ use anyhow::Result;
 use clap::Parser;
 use ura::{
     cli::{Cli, Command, LoopCommand},
+    client::HttpClient,
     config::Config,
     receiver::run_receive,
 };
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Receive => run_receive(),
+        Command::Receive { bind } => {
+            let token = Config::load_token_with_override(cli.token)?;
+            run_receive(bind, token).await
+        }
         Command::Play { url } => {
             let config = Config::load_with_overrides(cli.receiver_url, cli.token)?;
-            println!(
-                "play: placeholder; would send {url} to {} with configured token",
-                config.receiver_url
-            );
+            let client = HttpClient::new(config.receiver_url, config.token)?;
+            client.play(&url)?;
+            println!("play: sent {url}");
             Ok(())
         }
         Command::Enqueue { url } => {
             let config = Config::load_with_overrides(cli.receiver_url, cli.token)?;
-            println!(
-                "enqueue: placeholder; would send {url} to {} with configured token",
-                config.receiver_url
-            );
+            let client = HttpClient::new(config.receiver_url, config.token)?;
+            client.enqueue(&url)?;
+            println!("enqueue: sent {url}");
             Ok(())
         }
         Command::Toggle => {
             let config = Config::load_with_overrides(cli.receiver_url, cli.token)?;
-            println!(
-                "toggle: placeholder; would send toggle to {} with configured token",
-                config.receiver_url
-            );
+            let client = HttpClient::new(config.receiver_url, config.token)?;
+            client.control("toggle")?;
+            println!("toggle: sent");
             Ok(())
         }
         Command::Stop => {
             let config = Config::load_with_overrides(cli.receiver_url, cli.token)?;
-            println!(
-                "stop: placeholder; would send stop to {} with configured token",
-                config.receiver_url
-            );
+            let client = HttpClient::new(config.receiver_url, config.token)?;
+            client.control("stop")?;
+            println!("stop: sent");
             Ok(())
         }
         Command::Loop { command } => {
             let config = Config::load_with_overrides(cli.receiver_url, cli.token)?;
+            let client = HttpClient::new(config.receiver_url, config.token)?;
             match command {
-                LoopCommand::Off => println!(
-                    "loop off: placeholder; would send loop-off to {} with configured token",
-                    config.receiver_url
-                ),
-                LoopCommand::One => println!(
-                    "loop one: placeholder; would send loop-one to {} with configured token",
-                    config.receiver_url
-                ),
-                LoopCommand::Queue => println!(
-                    "loop queue: placeholder; would send loop-queue to {} with configured token",
-                    config.receiver_url
-                ),
-                LoopCommand::Status => println!(
-                    "loop status: placeholder; would request loop status from {} with configured token",
-                    config.receiver_url
-                ),
+                LoopCommand::Off => {
+                    client.control("loop-off")?;
+                    println!("loop off: sent");
+                }
+                LoopCommand::One => {
+                    client.control("loop-one")?;
+                    println!("loop one: sent");
+                }
+                LoopCommand::Queue => {
+                    client.control("loop-queue")?;
+                    println!("loop queue: sent");
+                }
+                LoopCommand::Status => {
+                    let status = client.loop_status()?;
+                    println!("loop status: {status:?}");
+                }
             }
             Ok(())
         }
         Command::Status => {
             let config = Config::load_with_overrides(cli.receiver_url, cli.token)?;
-            println!(
-                "status: placeholder; would request status from {} with configured token",
-                config.receiver_url
-            );
+            let client = HttpClient::new(config.receiver_url, config.token)?;
+            let status = client.status()?;
+            println!("{}", serde_json::to_string_pretty(&status)?);
             Ok(())
         }
         Command::History => {
             let config = Config::load_with_overrides(cli.receiver_url, cli.token)?;
-            println!(
-                "history: placeholder; would request history from {} with configured token",
-                config.receiver_url
-            );
+            let client = HttpClient::new(config.receiver_url, config.token)?;
+            let history = client.history()?;
+            println!("{}", serde_json::to_string_pretty(&history)?);
             Ok(())
         }
     }

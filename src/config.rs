@@ -44,6 +44,17 @@ impl Config {
             token,
         })
     }
+
+    pub fn load_token_with_override(token: Option<String>) -> Result<String> {
+        let file_config = load_file_config()?.unwrap_or_default();
+        Self::token_from_parts(file_config, token)
+    }
+
+    fn token_from_parts(file_config: FileConfig, token: Option<String>) -> Result<String> {
+        token
+            .or(file_config.token)
+            .ok_or_else(|| UraError::MissingConfigField("token").into())
+    }
 }
 
 fn load_file_config() -> Result<Option<FileConfig>> {
@@ -71,6 +82,15 @@ pub fn config_path() -> Result<PathBuf> {
 pub fn default_mpv_socket_path() -> Result<PathBuf> {
     let runtime_dir = env::var_os("XDG_RUNTIME_DIR").ok_or(UraError::MissingRuntimeDir)?;
     Ok(PathBuf::from(runtime_dir).join("ura/mpv.sock"))
+}
+
+pub fn default_db_path() -> Result<PathBuf> {
+    if let Some(data_home) = env::var_os("XDG_DATA_HOME") {
+        return Ok(PathBuf::from(data_home).join("ura/ura.db"));
+    }
+
+    let home = env::var_os("HOME").ok_or(UraError::MissingHome)?;
+    Ok(PathBuf::from(home).join(".local/share/ura/ura.db"))
 }
 
 #[cfg(test)]
@@ -167,5 +187,17 @@ token = "secret"
             error.to_string().contains("missing required config field"),
             "{error:#}"
         );
+    }
+
+    #[test]
+    fn receive_can_load_token_without_receiver_url() {
+        let file_config = FileConfig {
+            receiver_url: None,
+            token: Some("secret".to_string()),
+        };
+
+        let token = Config::token_from_parts(file_config, None).expect("load receiver token");
+
+        assert_eq!(token, "secret");
     }
 }

@@ -1,3 +1,5 @@
+use std::net::SocketAddr;
+
 use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
@@ -16,7 +18,11 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Run the local audio receiver.
-    Receive,
+    Receive {
+        /// Address for the HTTP receiver API to bind.
+        #[arg(long, default_value = "127.0.0.1:8765")]
+        bind: SocketAddr,
+    },
     /// Play a URL immediately.
     Play { url: String },
     /// Add a URL to the playback queue.
