@@ -88,8 +88,8 @@ impl MpvClient {
 
     pub fn loop_status(&mut self) -> Result<LoopStatus> {
         Ok(normalize_loop_status(
-            self.get_string_property("loop-file")?,
-            self.get_string_property("loop-playlist")?,
+            self.get_loop_property("loop-file")?,
+            self.get_loop_property("loop-playlist")?,
         ))
     }
 
@@ -137,6 +137,21 @@ impl MpvClient {
         };
         match response.data {
             Some(Value::String(value)) => Ok(Some(value)),
+            Some(Value::Null) | None => Ok(None),
+            Some(value) => bail!(UraError::InvalidMpvResponse(value.to_string())),
+        }
+    }
+
+    fn get_loop_property(&mut self, name: &str) -> Result<Option<String>> {
+        let response = match self.send_command(json!({ "command": ["get_property", name] })) {
+            Ok(response) => response,
+            Err(error) if is_property_unavailable(&error) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        match response.data {
+            Some(Value::String(value)) => Ok(Some(value)),
+            Some(Value::Bool(false)) => Ok(Some("no".to_string())),
+            Some(Value::Bool(true)) => Ok(Some("yes".to_string())),
             Some(Value::Null) | None => Ok(None),
             Some(value) => bail!(UraError::InvalidMpvResponse(value.to_string())),
         }

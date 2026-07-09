@@ -356,7 +356,7 @@ fn authorize(headers: &HeaderMap, state: &AppState) -> std::result::Result<(), A
     }
 }
 
-fn validate_receiver_token(token: &str) -> AnyhowResult<()> {
+pub fn validate_receiver_token(token: &str) -> AnyhowResult<()> {
     let token = token.trim();
     if token.is_empty() {
         return Err(anyhow::anyhow!("receiver token must not be empty"));

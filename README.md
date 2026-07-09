@@ -40,7 +40,8 @@ nix develop -c ./scripts/verify.sh
 
 ## Configuration
 
-Client commands read:
+`~/.config/ura/config.toml` is the main ura configuration file for both the
+receiver and client commands.
 
 ```text
 $XDG_CONFIG_HOME/ura/config.toml
@@ -50,14 +51,43 @@ $XDG_CONFIG_HOME/ura/config.toml
 Example:
 
 ```toml
-receiver_url = "http://127.0.0.1:8765"
 token = "paste-a-random-token-of-at-least-32-chars"
+receiver_url = "http://127.0.0.1:8765"
+bind = "127.0.0.1:8765"
 ```
 
-CLI flags override config:
+Create a local config with:
+
+```bash
+ura config init
+```
+
+This writes `~/.config/ura/config.toml`, generates a random token, and prints
+the created path without printing the full token. Use `--force` to replace an
+existing config, `--receiver-url` to write a non-default receiver URL, `--bind`
+to write the receiver bind address, and `--token` when you want to reuse an
+existing token.
+
+For Tailscale use from another device, initialize with the Tailscale address:
+
+```bash
+ura config init --receiver-url http://100.x.y.z:8765 --bind 100.x.y.z:8765
+```
+
+Generate a token without writing files:
+
+```bash
+ura token generate
+```
+
+Priority order is CLI flags, then environment variables, then `config.toml`,
+then safe defaults where available. CLI flags still work:
 
 ```bash
 ura --receiver-url http://127.0.0.1:8765 --token "paste-a-random-token-of-at-least-32-chars" status
+ura receive --bind 127.0.0.1:8765
+ura --config ~/.config/ura/config.toml status
+ura --config ~/.config/ura/config.toml receive
 ```
 
 ## Receiver
@@ -65,18 +95,18 @@ ura --receiver-url http://127.0.0.1:8765 --token "paste-a-random-token-of-at-lea
 Start a local-only receiver:
 
 ```bash
-ura receive --token "paste-a-random-token-of-at-least-32-chars"
+ura receive
 ```
 
 Expose it on a LAN or Tailscale address only when you intend to:
 
 ```bash
-ura receive --bind 100.x.y.z:8765 --token "paste-a-random-token-of-at-least-32-chars"
+ura receive --bind 100.x.y.z:8765
 ```
 
-The default bind address is `127.0.0.1:8765`.
-Receiver tokens must be at least 32 characters and cannot be empty or
-`change-me`.
+`ura receive` reads `token` and `bind` from `config.toml`. The default bind
+address is `127.0.0.1:8765` when config omits `bind`. Receiver tokens must be
+at least 32 characters and cannot be empty or `change-me`.
 
 ## Running as a systemd user service
 
@@ -93,7 +123,8 @@ mkdir -p ~/.config/ura
 cp contrib/systemd/ura.service ~/.config/systemd/user/ura.service
 cp contrib/systemd/ura.env.example ~/.config/ura/ura.env
 
-$EDITOR ~/.config/ura/ura.env
+ura config init
+$EDITOR ~/.config/ura/config.toml
 
 systemctl --user daemon-reload
 systemctl --user enable --now ura.service
@@ -101,10 +132,25 @@ systemctl --user status ura.service
 journalctl --user -u ura.service -f
 ```
 
-Generate a private token before editing the env file:
+For an existing service, update `config.toml`, then restart:
 
 ```bash
-openssl rand -base64 32
+ura config init --force
+systemctl --user restart ura.service
+ura status
+```
+
+The systemd service reads token and bind settings from
+`~/.config/ura/config.toml`. The optional `~/.config/ura/ura.env` file is only
+for process environment such as `RUST_LOG`.
+
+If you want to load `~/.config/ura/ura.env` into an interactive shell, use
+`set -a` so the assignments are exported to child processes:
+
+```bash
+set -a
+source ~/.config/ura/ura.env
+set +a
 ```
 
 The example service runs:
@@ -118,14 +164,8 @@ profile or replace `ExecStart` with the absolute path to the binary. `mpv` and
 `yt-dlp` must also be available in the service environment.
 
 The default receiver bind address remains `127.0.0.1:8765`. To bind explicitly
-to a Tailscale or LAN address, edit the copied service and override
-`ExecStart`, for example:
-
-```ini
-ExecStart=ura receive --bind 100.x.y.z:8765
-```
-
-Then reload and restart:
+to a Tailscale or LAN address, set `bind` in `config.toml`, then reload and
+restart:
 
 ```bash
 systemctl --user daemon-reload
@@ -164,7 +204,6 @@ systemd.user.services.ura = {
   Service = {
     Type = "simple";
     Environment = [
-      "URA_TOKEN=replace-with-a-random-token-at-least-32-chars"
       "RUST_LOG=ura=info"
     ];
     ExecStart = "${pkgs.ura}/bin/ura receive";
@@ -192,11 +231,16 @@ ura history
 Loop controls:
 
 ```bash
+ura loop
 ura loop off
-ura loop one
+ura loop track
 ura loop queue
 ura loop status
 ```
+
+`ura loop` toggles current-track looping on or off. `ura loop track` loops the
+current track forever. `ura loop queue` loops the mpv playlist queue. `ura loop
+off` disables both current-track and queue looping.
 
 ## Browser Extension
 
@@ -224,9 +268,7 @@ extension loading.
 For a local real-device smoke test, use one shell for the receiver:
 
 ```bash
-export URA_TOKEN="$(openssl rand -base64 32)"
-export URA_RECEIVER_URL="http://127.0.0.1:8765"
-
+ura config init --force
 RUST_LOG=ura=info cargo run -- receive
 ```
 
@@ -236,7 +278,7 @@ From another shell, run:
 cargo run -- play 'https://www.youtube.com/watch?v=ynsLjv1AyEg'
 cargo run -- status
 cargo run -- toggle
-cargo run -- loop one
+cargo run -- loop track
 cargo run -- loop off
 cargo run -- stop
 cargo run -- history
@@ -286,7 +328,8 @@ optional MPRIS integration through `mpv-mpris`.
 
 - The HTTP API requires `Authorization: Bearer <token>`.
 - Keep the receiver token private.
-- Generate a strong token with `openssl rand -base64 32`.
+- Generate a strong token with `ura token generate` or `openssl rand -base64 32`.
+- Receiver and client commands must use the same `token` from `config.toml`.
 - Receiver tokens must be at least 32 characters; empty tokens and `change-me`
   are rejected.
 - The default bind address is localhost only.
@@ -294,6 +337,7 @@ optional MPRIS integration through `mpv-mpris`.
 - LAN/Tailscale exposure requires explicit `--bind`.
 - Bind to a Tailscale address explicitly when controlling playback from another
   device.
+- Tailscale is recommended for cross-device use.
 - Do not expose the receiver directly to the public internet.
 - HTTP bearer tokens are not encrypted on plain LAN HTTP.
 - Only YouTube-style `http://` or `https://` URLs are accepted.
