@@ -24,27 +24,26 @@ use tokio::{
     sync::oneshot,
     task::JoinHandle,
 };
+use tracing::{error, info, warn};
 
 use crate::config::{default_db_path, default_mpv_socket_path};
 use crate::db::{Database, HistoryEntry};
 use crate::mpv::{LoopMode, LoopStatus, MpvClient};
 
 pub async fn run_receive(bind: SocketAddr, token: String) -> AnyhowResult<()> {
+    info!("receiver startup");
     validate_receiver_token(&token)?;
     ensure_program_in_path("mpv")?;
     ensure_program_in_path("yt-dlp")?;
 
     let socket_path = default_mpv_socket_path()?;
+    info!(socket_path = %socket_path.display(), "mpv IPC socket path");
     create_runtime_dir(&socket_path)?;
     let database = Database::open(default_db_path()?)?;
 
     let receiver = Receiver::start(socket_path)?;
     let (socket_path, mut mpv_shutdown, mut mpv_task) = receiver.into_parts();
-    println!(
-        "receive: mpv started with IPC socket at {}; HTTP API listening on http://{}",
-        socket_path.display(),
-        bind
-    );
+    info!(bind = %bind, "HTTP receiver bind address");
 
     let (api_shutdown, api_shutdown_rx) = oneshot::channel();
     let mut api_shutdown = Some(api_shutdown);
@@ -53,8 +52,10 @@ pub async fn run_receive(bind: SocketAddr, token: String) -> AnyhowResult<()> {
     tokio::select! {
         result = &mut mpv_task => {
             let status = task_result(result, "mpv supervision")?;
+            info!(status = %status, "mpv child termination");
             signal_shutdown(&mut api_shutdown);
             await_task(api_task, "HTTP receiver").await?;
+            info!("receiver shutdown");
             exit_status_result(status)
         }
         result = &mut api_task => {
@@ -62,18 +63,23 @@ pub async fn run_receive(bind: SocketAddr, token: String) -> AnyhowResult<()> {
             signal_shutdown(&mut mpv_shutdown);
             let mpv_result = await_task(mpv_task, "mpv supervision").await;
             api_result?;
-            mpv_result?;
+            let status = mpv_result?;
+            info!(status = %status, "mpv child termination");
+            info!("receiver shutdown");
             Ok(())
         }
         result = tokio::signal::ctrl_c() => {
+            info!("shutdown signal received");
             let ctrl_c_result = result.with_context(|| "failed to listen for Ctrl+C");
             signal_shutdown(&mut api_shutdown);
             signal_shutdown(&mut mpv_shutdown);
             let mpv_result = await_task(mpv_task, "mpv supervision").await;
             let api_result = await_task(api_task, "HTTP receiver").await;
             ctrl_c_result?;
-            mpv_result?;
+            let status = mpv_result?;
             api_result?;
+            info!(status = %status, "mpv child termination");
+            info!("receiver shutdown");
             Ok(())
         }
     }
@@ -95,6 +101,7 @@ async fn run_api(
     let listener = TcpListener::bind(bind)
         .await
         .with_context(|| format!("failed to bind HTTP receiver to {bind}"))?;
+    info!(bind = %bind, "HTTP receiver listening");
 
     axum::serve(listener, app)
         .with_graceful_shutdown(async {
@@ -181,6 +188,7 @@ async fn play(
     State(state): State<AppState>,
     Json(request): Json<PlayRequest>,
 ) -> std::result::Result<Json<OkResponse>, AppError> {
+    info!(request_type = "play", "HTTP request");
     let play_url = validate_supported_url(&request.url)?;
     let source_url = request.url;
     let source = request.source;
@@ -198,6 +206,7 @@ async fn enqueue(
     State(state): State<AppState>,
     Json(request): Json<PlayRequest>,
 ) -> std::result::Result<Json<OkResponse>, AppError> {
+    info!(request_type = "enqueue", "HTTP request");
     let play_url = validate_supported_url(&request.url)?;
     let source_url = request.url;
     let source = request.source;
@@ -216,6 +225,7 @@ async fn control(
     Json(request): Json<ControlRequest>,
 ) -> std::result::Result<Json<ControlResponse>, AppError> {
     let command = request.command;
+    info!(request_type = "control", command = %command, "HTTP request");
 
     let loop_status = match command.as_str() {
         "toggle" | "stop" | "pause" | "resume" => {
@@ -252,6 +262,7 @@ async fn control(
 async fn status(
     State(state): State<AppState>,
 ) -> std::result::Result<Json<crate::mpv::MpvStatus>, AppError> {
+    info!(request_type = "status", "HTTP request");
     let status = run_mpv_command(state, |client| client.status()).await?;
     Ok(Json(status))
 }
@@ -259,6 +270,7 @@ async fn status(
 async fn history(
     State(state): State<AppState>,
 ) -> std::result::Result<Json<Vec<HistoryEntry>>, AppError> {
+    info!(request_type = "history", "HTTP request");
     let history = run_db_command(state, |database| database.history()).await?;
     Ok(Json(history))
 }
@@ -283,8 +295,14 @@ where
         command(&mut client)
     })
     .await
-    .map_err(|error| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
-    .map_err(|error| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))
+    .map_err(|error| {
+        error!(error = %error, "mpv IPC task failed");
+        AppError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
+    })?
+    .map_err(|error| {
+        error!(error = %error, "mpv IPC error");
+        AppError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
+    })
 }
 
 async fn record_history(
@@ -293,10 +311,14 @@ async fn record_history(
     play_url: String,
     source: Option<String>,
 ) -> std::result::Result<(), AppError> {
-    run_db_command(state, move |database| {
+    let result = run_db_command(state, move |database| {
         database.record_play(&source_url, &play_url, source.as_deref())
     })
-    .await
+    .await;
+    if let Err(error) = &result {
+        error!(error = %error.message, "database write error");
+    }
+    result
 }
 
 async fn run_db_command<T, F>(state: AppState, command: F) -> std::result::Result<T, AppError>
@@ -306,13 +328,17 @@ where
 {
     tokio::task::spawn_blocking(move || command(&state.database))
         .await
-        .map_err(|error| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
+        .map_err(|error| {
+            error!(error = %error, "database task failed");
+            AppError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
+        })?
         .map_err(|error| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))
 }
 
 fn authorize(headers: &HeaderMap, state: &AppState) -> std::result::Result<(), AppError> {
     let expected = format!("Bearer {}", state.token);
     let Some(actual) = headers.get(axum::http::header::AUTHORIZATION) else {
+        warn!(reason = "missing bearer token", "auth failure");
         return Err(AppError::new(
             StatusCode::UNAUTHORIZED,
             "missing bearer token",
@@ -322,6 +348,7 @@ fn authorize(headers: &HeaderMap, state: &AppState) -> std::result::Result<(), A
     if actual.as_bytes() == expected.as_bytes() {
         Ok(())
     } else {
+        warn!(reason = "invalid bearer token", "auth failure");
         Err(AppError::new(
             StatusCode::UNAUTHORIZED,
             "invalid bearer token",
@@ -350,6 +377,7 @@ fn validate_receiver_token(token: &str) -> AnyhowResult<()> {
 
 fn validate_supported_url(url: &str) -> std::result::Result<String, AppError> {
     let Some(parsed) = ParsedUrl::parse(url) else {
+        log_url_validation_failure(url, "malformed URL or unsupported scheme");
         Err(AppError::new(
             StatusCode::BAD_REQUEST,
             "unsupported URL; expected a YouTube URL using http:// or https://",
@@ -357,20 +385,62 @@ fn validate_supported_url(url: &str) -> std::result::Result<String, AppError> {
     };
 
     if parsed.is_supported_youtube_video_url() {
+        log_url_validation_success(&parsed);
         return Ok(parsed.without_playlist_context());
     }
 
     if parsed.has_playlist_context() {
+        log_url_validation_failure(url, "playlist URLs are not supported in the MVP");
         return Err(AppError::new(
             StatusCode::BAD_REQUEST,
             "playlist URLs are not supported in the MVP",
         ));
     }
 
+    log_url_validation_failure(
+        url,
+        "unsupported host; expected youtube.com, music.youtube.com, or youtu.be",
+    );
     Err(AppError::new(
         StatusCode::BAD_REQUEST,
         "unsupported URL; expected youtube.com, music.youtube.com, or youtu.be",
     ))
+}
+
+fn log_url_validation_success(parsed: &ParsedUrl) {
+    match parsed.sanitized_youtube_video_id() {
+        Some(video_id) => info!(
+            host = %parsed.host,
+            video_id = %video_id,
+            "URL validation succeeded"
+        ),
+        None => info!(host = %parsed.host, "URL validation succeeded"),
+    }
+}
+
+fn log_url_validation_failure(url: &str, reason: &'static str) {
+    match safe_host_from_url(url) {
+        Some(host) => warn!(host = %host, reason, "URL validation failed"),
+        None => warn!(reason, "URL validation failed"),
+    }
+}
+
+fn safe_host_from_url(url: &str) -> Option<String> {
+    let trimmed = url.trim();
+    let (_, rest) = trimmed.split_once("://")?;
+    let authority_with_query = rest
+        .split_once('/')
+        .map(|(authority, _)| authority)
+        .unwrap_or(rest);
+    let authority = authority_with_query
+        .split_once('?')
+        .map(|(authority, _)| authority)
+        .unwrap_or(authority_with_query);
+
+    authority
+        .parse::<Authority>()
+        .ok()
+        .map(|authority| authority.host)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -458,6 +528,23 @@ impl ParsedUrl {
             .unwrap_or(false)
     }
 
+    fn query_param_value(&self, name: &str) -> Option<&str> {
+        self.query.as_deref()?.split('&').find_map(|part| {
+            part.split_once('=')
+                .and_then(|(param_name, value)| (param_name == name).then_some(value))
+        })
+    }
+
+    fn sanitized_youtube_video_id(&self) -> Option<String> {
+        let raw = match self.host.as_str() {
+            "youtube.com" | "www.youtube.com" | "music.youtube.com" => self.query_param_value("v"),
+            "youtu.be" => self.path.trim_start_matches('/').split('/').next(),
+            _ => None,
+        }?;
+
+        sanitize_video_id(raw)
+    }
+
     fn without_playlist_context(&self) -> String {
         let query = self.query_without_param("list");
         let mut url = format!("{}://{}{}", self.scheme, self.authority, self.path);
@@ -530,6 +617,16 @@ fn query_param_name(part: &str) -> &str {
     part.split_once('=').map(|(name, _)| name).unwrap_or(part)
 }
 
+fn sanitize_video_id(value: &str) -> Option<String> {
+    let video_id: String = value
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '-' || *ch == '_')
+        .take(128)
+        .collect();
+
+    (!video_id.is_empty()).then_some(video_id)
+}
+
 async fn supervise_mpv_child(
     mut mpv: Child,
     mut shutdown: oneshot::Receiver<()>,
@@ -598,6 +695,10 @@ impl Receiver {
             .stdin(Stdio::null())
             .spawn()
             .with_context(|| "failed to start mpv")?;
+        match mpv.id() {
+            Some(pid) => info!(pid, "mpv child started"),
+            None => info!("mpv child started"),
+        }
         let (shutdown, shutdown_rx) = oneshot::channel();
         let task = tokio::spawn(supervise_mpv_child(mpv, shutdown_rx));
 
@@ -957,6 +1058,42 @@ mod tests {
             .expect_err("watch URL without video ID should fail");
 
         assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn extracts_safe_host_for_rejected_url_logs() {
+        assert_eq!(
+            safe_host_from_url("ftp://Example.Test/audio"),
+            Some("example.test".to_string())
+        );
+        assert_eq!(
+            safe_host_from_url("https://example.test?watch=1"),
+            Some("example.test".to_string())
+        );
+        assert_eq!(safe_host_from_url("https://user@example.test/watch"), None);
+        assert_eq!(safe_host_from_url("not-a-url"), None);
+    }
+
+    #[test]
+    fn extracts_sanitized_youtube_video_ids_for_logs() {
+        let watch = ParsedUrl::parse("https://www.youtube.com/watch?v=ynsLjv1AyEg")
+            .expect("parse watch URL");
+        let short = ParsedUrl::parse("https://youtu.be/ynsLjv1AyEg").expect("parse short URL");
+        let odd = ParsedUrl::parse("https://www.youtube.com/watch?v=abc<script>")
+            .expect("parse odd watch URL");
+
+        assert_eq!(
+            watch.sanitized_youtube_video_id(),
+            Some("ynsLjv1AyEg".to_string())
+        );
+        assert_eq!(
+            short.sanitized_youtube_video_id(),
+            Some("ynsLjv1AyEg".to_string())
+        );
+        assert_eq!(
+            odd.sanitized_youtube_video_id(),
+            Some("abcscript".to_string())
+        );
     }
 
     #[test]

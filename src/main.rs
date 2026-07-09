@@ -13,6 +13,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Command::Receive { bind } => {
+            init_receive_logging();
             let token = Config::load_token_with_override(cli.token)?;
             run_receive(bind, token).await
         }
@@ -82,4 +83,16 @@ async fn main() -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn init_receive_logging() {
+    use tracing_subscriber::{EnvFilter, fmt, prelude::*};
+
+    let env_filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("ura=info"));
+
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(fmt::layer())
+        .init();
 }
