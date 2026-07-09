@@ -14,6 +14,24 @@ pub struct MpvClient {
     stream: UnixStream,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoopMode {
+    Off,
+    One,
+    Queue,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoopStatus {
+    Off,
+    One,
+    Queue,
+    Custom {
+        loop_file: Option<String>,
+        loop_playlist: Option<String>,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MpvStatus {
     pub pause: Option<bool>,
@@ -59,6 +77,20 @@ impl MpvClient {
     pub fn stop(&mut self) -> Result<()> {
         self.send_command(json!({ "command": ["stop"] }))?;
         Ok(())
+    }
+
+    pub fn set_loop_mode(&mut self, mode: LoopMode) -> Result<()> {
+        for command in loop_mode_commands(mode) {
+            self.send_command(command)?;
+        }
+        Ok(())
+    }
+
+    pub fn loop_status(&mut self) -> Result<LoopStatus> {
+        Ok(normalize_loop_status(
+            self.get_string_property("loop-file")?,
+            self.get_string_property("loop-playlist")?,
+        ))
     }
 
     pub fn status(&mut self) -> Result<MpvStatus> {
@@ -134,6 +166,34 @@ fn loadfile_command(url: &str, mode: LoadMode) -> Value {
     json!({ "command": ["loadfile", url, mode.as_mpv_arg()] })
 }
 
+fn set_property_command(name: &str, value: &str) -> Value {
+    json!({ "command": ["set_property", name, value] })
+}
+
+fn loop_mode_properties(mode: LoopMode) -> [(&'static str, &'static str); 2] {
+    match mode {
+        LoopMode::Off => [("loop-file", "no"), ("loop-playlist", "no")],
+        LoopMode::One => [("loop-file", "inf"), ("loop-playlist", "no")],
+        LoopMode::Queue => [("loop-file", "no"), ("loop-playlist", "inf")],
+    }
+}
+
+fn loop_mode_commands(mode: LoopMode) -> [Value; 2] {
+    loop_mode_properties(mode).map(|(name, value)| set_property_command(name, value))
+}
+
+fn normalize_loop_status(loop_file: Option<String>, loop_playlist: Option<String>) -> LoopStatus {
+    match (loop_file.as_deref(), loop_playlist.as_deref()) {
+        (Some("inf"), _) => LoopStatus::One,
+        (_, Some("inf")) => LoopStatus::Queue,
+        (Some("no"), Some("no")) => LoopStatus::Off,
+        _ => LoopStatus::Custom {
+            loop_file,
+            loop_playlist,
+        },
+    }
+}
+
 fn parse_response(response: &str) -> Result<MpvResponse> {
     let response: MpvResponse = serde_json::from_str(response)
         .map_err(|_| UraError::InvalidMpvResponse(response.trim().to_string()))?;
@@ -161,6 +221,62 @@ mod tests {
         assert_eq!(
             loadfile_command("https://youtu.be/example", LoadMode::AppendPlay),
             json!({ "command": ["loadfile", "https://youtu.be/example", "append-play"] })
+        );
+    }
+
+    #[test]
+    fn builds_loop_off_commands() {
+        assert_eq!(
+            loop_mode_commands(LoopMode::Off),
+            [
+                json!({ "command": ["set_property", "loop-file", "no"] }),
+                json!({ "command": ["set_property", "loop-playlist", "no"] }),
+            ]
+        );
+    }
+
+    #[test]
+    fn builds_loop_one_commands() {
+        assert_eq!(
+            loop_mode_commands(LoopMode::One),
+            [
+                json!({ "command": ["set_property", "loop-file", "inf"] }),
+                json!({ "command": ["set_property", "loop-playlist", "no"] }),
+            ]
+        );
+    }
+
+    #[test]
+    fn builds_loop_queue_commands() {
+        assert_eq!(
+            loop_mode_commands(LoopMode::Queue),
+            [
+                json!({ "command": ["set_property", "loop-file", "no"] }),
+                json!({ "command": ["set_property", "loop-playlist", "inf"] }),
+            ]
+        );
+    }
+
+    #[test]
+    fn normalizes_loop_status() {
+        assert_eq!(
+            normalize_loop_status(Some("no".to_string()), Some("no".to_string())),
+            LoopStatus::Off
+        );
+        assert_eq!(
+            normalize_loop_status(Some("inf".to_string()), Some("no".to_string())),
+            LoopStatus::One
+        );
+        assert_eq!(
+            normalize_loop_status(Some("no".to_string()), Some("inf".to_string())),
+            LoopStatus::Queue
+        );
+        assert_eq!(
+            normalize_loop_status(Some("2".to_string()), Some("no".to_string())),
+            LoopStatus::Custom {
+                loop_file: Some("2".to_string()),
+                loop_playlist: Some("no".to_string()),
+            }
         );
     }
 

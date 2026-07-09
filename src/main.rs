@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::Parser;
 use ura::{
-    cli::{Cli, Command},
+    cli::{Cli, Command, LoopCommand},
     config::Config,
 };
 
@@ -43,6 +43,28 @@ fn main() -> Result<()> {
                 "stop: placeholder; would send stop to {} with configured token",
                 config.receiver_url
             );
+            Ok(())
+        }
+        Command::Loop { command } => {
+            let config = Config::load_with_overrides(cli.receiver_url, cli.token)?;
+            match command {
+                LoopCommand::Off => println!(
+                    "loop off: placeholder; would send loop-off to {} with configured token",
+                    config.receiver_url
+                ),
+                LoopCommand::One => println!(
+                    "loop one: placeholder; would send loop-one to {} with configured token",
+                    config.receiver_url
+                ),
+                LoopCommand::Queue => println!(
+                    "loop queue: placeholder; would send loop-queue to {} with configured token",
+                    config.receiver_url
+                ),
+                LoopCommand::Status => println!(
+                    "loop status: placeholder; would request loop status from {} with configured token",
+                    config.receiver_url
+                ),
+            }
             Ok(())
         }
         Command::Status => {

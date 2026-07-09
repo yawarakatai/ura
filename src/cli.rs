@@ -25,8 +25,25 @@ pub enum Command {
     Toggle,
     /// Stop playback on the receiver.
     Stop,
+    /// Control playback looping.
+    Loop {
+        #[command(subcommand)]
+        command: LoopCommand,
+    },
     /// Show current receiver status.
     Status,
     /// Show playback history.
     History,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum LoopCommand {
+    /// Disable current-track and queue looping.
+    Off,
+    /// Loop the current track forever.
+    One,
+    /// Loop the playback queue forever.
+    Queue,
+    /// Show the current loop mode.
+    Status,
 }
