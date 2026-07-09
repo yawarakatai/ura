@@ -3,16 +3,14 @@ use clap::Parser;
 use ura::{
     cli::{Cli, Command, LoopCommand},
     config::Config,
+    receiver::run_receive,
 };
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Receive => {
-            println!("receive: placeholder; mpv startup and HTTP API are not implemented yet");
-            Ok(())
-        }
+        Command::Receive => run_receive(),
         Command::Play { url } => {
             let config = Config::load_with_overrides(cli.receiver_url, cli.token)?;
             println!(
