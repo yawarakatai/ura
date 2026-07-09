@@ -24,6 +24,9 @@
               # Rust (Fenix (stable))
               inputs'.fenix.packages.stable.toolchain
               inputs'.fenix.packages.stable.rust-analyzer
+              pkgs.mpv
+              pkgs.sqlite
+              pkgs.yt-dlp
             ];
           };
         };
