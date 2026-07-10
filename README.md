@@ -295,6 +295,77 @@ and Ctrl+C in the receiver shell shuts down the HTTP server without leaving an
 Quote URLs containing `&` in shells such as zsh, otherwise the shell treats
 parts of the URL as background commands.
 
+### External Tailscale Smoke Test
+
+Use this check to verify `ura` as a real LAN/Tailscale audio receiver from a
+second NixOS/Linux device. Use a shared token of at least 32 characters and do
+not paste the real token into logs or screenshots.
+
+On the receiver device connected to speakers or headphones:
+
+```bash
+tailscale ip -4
+```
+
+Edit `~/.config/ura/config.toml`:
+
+```toml
+token = "<shared-token>"
+receiver_url = "http://<tailscale-ip>:8765"
+bind = "<tailscale-ip>:8765"
+```
+
+Restart and watch the service:
+
+```bash
+systemctl --user daemon-reload
+systemctl --user restart ura.service
+systemctl --user status ura.service
+journalctl --user -u ura.service -f
+```
+
+Confirm the receiver log says it is listening on the Tailscale address, not
+`0.0.0.0`, unless you are intentionally testing a LAN bind.
+
+On the client device, clone or update the repository and create
+`~/.config/ura/config.toml`:
+
+```toml
+token = "<same-shared-token>"
+receiver_url = "http://<receiver-tailscale-ip>:8765"
+```
+
+Then run:
+
+```bash
+nix develop -c cargo run -- status
+nix develop -c cargo run -- play 'https://www.youtube.com/watch?v=ynsLjv1AyEg'
+nix develop -c cargo run -- toggle
+nix develop -c cargo run -- stop
+```
+
+If the client cannot reach the receiver, check:
+
+```bash
+tailscale status
+ping <receiver-tailscale-ip>
+curl -i -H "Authorization: Bearer <token>" http://<receiver-tailscale-ip>:8765/v1/status
+curl -i -H "Authorization: Bearer wrong-token" http://<receiver-tailscale-ip>:8765/v1/status
+```
+
+Verification checklist:
+
+1. Receiver listens on the Tailscale IP.
+2. Client device can reach `/v1/status`.
+3. Client device can start playback.
+4. Audio plays on the receiver device.
+5. `toggle` works from the client device.
+6. `stop` works from the client device.
+7. Invalid token returns 401.
+8. Receiver logs show request type without token values.
+9. Public internet exposure is not used.
+10. No new features are added for this smoke test.
+
 For Firefox:
 
 1. Open `about:debugging`.
