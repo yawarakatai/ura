@@ -70,37 +70,22 @@ checks them at startup and `mpv` uses `yt-dlp` for supported media URLs.
 
 ## NixOS And Home Manager
 
-This repository currently provides examples, not a NixOS module or Home Manager
-module.
-
-A Home Manager-style user service can be configured by pointing `ExecStart` at
-the actual `ura` binary available in your configuration:
+The flake exports a Home Manager module. Import it and enable the receiver with:
 
 ```nix
-systemd.user.services.ura = {
-  Unit = {
-    Description = "ura audio receiver";
-    After = [ "default.target" ];
-  };
+{
+  imports = [ inputs.ura.homeManagerModules.default ];
 
-  Service = {
-    Type = "simple";
-    Environment = [
-      "RUST_LOG=ura=info"
-    ];
-    ExecStart = "${pkgs.ura}/bin/ura serve";
-    Restart = "on-failure";
-    RestartSec = 2;
+  services.ura = {
+    enable = true;
+    bind = "0.0.0.0:8765";
   };
-
-  Install = {
-    WantedBy = [ "default.target" ];
-  };
-};
+}
 ```
 
-Replace `${pkgs.ura}/bin/ura` with the real package path or installed binary
-path for your system.
+The module installs `ura` and adds `mpv` and `yt-dlp` to the service `PATH`.
+`services.ura.package`, `services.ura.bind`, and `services.ura.logLevel` can be
+overridden when needed.
 
 ## LAN Binding
 

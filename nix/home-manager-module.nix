@@ -47,6 +47,11 @@ in
         After = [ "network.target" ];
       };
 
+      path = [
+        pkgs.mpv
+        pkgs.yt-dlp
+      ];
+
       Service = {
         Type = "simple";
 
