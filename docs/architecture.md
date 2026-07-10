@@ -39,8 +39,11 @@ ura config init
 ura token generate
 ```
 
-Controller commands read the receiver URL and token from configuration,
-environment variables, or CLI flags, then call the receiver HTTP API.
+Controller commands resolve a destination from `--to <name>` or the configured
+`selected_device`, then call the receiver HTTP API with that device's URL and
+bearer token. Legacy `receiver_url` and `token` config is still read when no
+`[[devices]]` entries exist. `URA_RECEIVER_URL`, `URA_TOKEN`,
+`--receiver-url`, and `--token` remain compatibility overrides.
 
 ## Browser Extension
 
@@ -75,6 +78,12 @@ All API routes require:
 ```text
 Authorization: Bearer <token>
 ```
+
+Authentication first checks active authorized-device token hashes in SQLite.
+Successful authorized-device authentication updates `last_seen_at` at most once
+per 60 seconds. If no authorized-device token matches, the receiver checks the
+legacy configured token as a compatibility fallback. Failed authentication does
+not update `last_seen_at`.
 
 Current endpoints:
 
@@ -176,7 +185,10 @@ title metadata.
 Playback history is stored in SQLite. The current schema has `tracks` and
 `plays` tables. `tracks` stores the original source URL, the URL passed to
 `mpv`, optional metadata fields, timestamps, and play count. `plays` stores
-individual play events and their optional source label.
+individual play events and their optional source label. `authorized_devices`
+stores receiver-side controller credentials using SHA-256 token hashes,
+creation time, coarse `last_seen_at`, and optional revocation time; plaintext
+tokens are not stored.
 
 For current YouTube URL playback, `source_url` is the URL received from the
 caller and `play_url` is the validated URL passed to `mpv`.
@@ -208,23 +220,34 @@ runtime socket:
 
 ## Configuration
 
-The current configuration file is `config.toml` with these fields:
+The controller configuration can store multiple remote devices:
 
 ```toml
-token = "a-random-token-of-at-least-32-characters"
-receiver_url = "http://127.0.0.1:8765"
+selected_device = "kamo"
+
+[[devices]]
+name = "kamo"
+url = "http://192.168.1.23:8765"
+token = "..."
+```
+
+The receiver still reads `bind` from `config.toml`:
+
+```toml
 bind = "127.0.0.1:8765"
 ```
 
-`ura config init` creates the file, generates a token, writes the default
-receiver URL and bind address, and prints the created path without printing the
-full token.
+Legacy flat `token` and `receiver_url` fields remain readable when no
+`[[devices]]` entries exist.
 
-Configuration priority for controller commands is:
+Destination priority for controller commands is:
 
-1. CLI flags
-2. environment variables: `URA_RECEIVER_URL`, `URA_TOKEN`
-3. `config.toml`
+1. command-local `--to <name>`
+2. `selected_device`
+3. legacy flat `receiver_url` and `token`
+
+`--receiver-url`, `--token`, `URA_RECEIVER_URL`, and `URA_TOKEN` remain
+compatibility overrides.
 
 Configuration priority for `ura serve` is:
 

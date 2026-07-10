@@ -27,21 +27,48 @@ pub enum Command {
         bind: Option<SocketAddr>,
     },
     /// Play a URL immediately.
-    Play { url: String },
+    Play {
+        #[arg(long)]
+        to: Option<String>,
+        url: String,
+    },
     /// Add a media URL to the end of the selected device's playback queue.
-    Queue { url: String },
+    Queue {
+        #[arg(long)]
+        to: Option<String>,
+        url: String,
+    },
     /// Pause playback on the receiver.
-    Pause,
+    Pause {
+        #[arg(long)]
+        to: Option<String>,
+    },
     /// Resume playback on the receiver.
-    Resume,
+    Resume {
+        #[arg(long)]
+        to: Option<String>,
+    },
     /// Toggle pause/resume on the receiver.
-    Toggle,
+    Toggle {
+        #[arg(long)]
+        to: Option<String>,
+    },
     /// Stop playback on the receiver.
-    Stop,
+    Stop {
+        #[arg(long)]
+        to: Option<String>,
+    },
     /// Control playback looping.
     Loop {
+        #[arg(long)]
+        to: Option<String>,
         #[command(subcommand)]
         command: Option<LoopCommand>,
+    },
+    /// Manage remote and authorized devices.
+    Device {
+        #[command(subcommand)]
+        command: DeviceCommand,
     },
     /// Manage local ura configuration.
     Config {
@@ -54,21 +81,39 @@ pub enum Command {
         command: TokenCommand,
     },
     /// Show current receiver status.
-    Status,
+    Status {
+        #[arg(long)]
+        to: Option<String>,
+    },
     /// Show playback history.
-    History,
+    History {
+        #[arg(long)]
+        to: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
 pub enum LoopCommand {
     /// Disable current-track and queue looping.
-    Off,
+    Off {
+        #[arg(long)]
+        to: Option<String>,
+    },
     /// Loop the current track forever.
-    Track,
+    Track {
+        #[arg(long)]
+        to: Option<String>,
+    },
     /// Loop the playback queue forever.
-    Queue,
+    Queue {
+        #[arg(long)]
+        to: Option<String>,
+    },
     /// Show the current loop mode.
-    Status,
+    Status {
+        #[arg(long)]
+        to: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -95,6 +140,27 @@ pub enum TokenCommand {
     Generate,
 }
 
+#[derive(Debug, Subcommand)]
+pub enum DeviceCommand {
+    /// List configured and authorized devices.
+    List,
+    /// Add a remote receiver this controller can use.
+    Add {
+        name: String,
+        address: String,
+        #[arg(long)]
+        token: String,
+    },
+    /// Select the default remote receiver.
+    Select { name: String },
+    /// Remove a remote receiver from controller configuration.
+    Remove { name: String },
+    /// Authorize a controller on this receiver.
+    Authorize { name: String },
+    /// Revoke a controller credential on this receiver.
+    Revoke { name: String },
+}
+
 #[cfg(test)]
 mod tests {
     use clap::CommandFactory;
@@ -106,18 +172,38 @@ mod tests {
         for args in [
             ["ura", "serve"].as_slice(),
             ["ura", "play", "https://youtu.be/example"].as_slice(),
+            ["ura", "play", "--to", "kamo", "https://youtu.be/example"].as_slice(),
             ["ura", "queue", "https://youtu.be/example"].as_slice(),
             ["ura", "pause"].as_slice(),
             ["ura", "resume"].as_slice(),
             ["ura", "toggle"].as_slice(),
             ["ura", "stop"].as_slice(),
             ["ura", "status"].as_slice(),
+            ["ura", "status", "--to", "kamo"].as_slice(),
             ["ura", "history"].as_slice(),
+            ["ura", "history", "--to", "kamo"].as_slice(),
             ["ura", "loop"].as_slice(),
             ["ura", "loop", "off"].as_slice(),
+            ["ura", "loop", "off", "--to", "kamo"].as_slice(),
             ["ura", "loop", "track"].as_slice(),
             ["ura", "loop", "queue"].as_slice(),
             ["ura", "loop", "status"].as_slice(),
+            ["ura", "loop", "status", "--to", "kamo"].as_slice(),
+            ["ura", "device", "list"].as_slice(),
+            [
+                "ura",
+                "device",
+                "add",
+                "kamo",
+                "192.168.1.23",
+                "--token",
+                "secret",
+            ]
+            .as_slice(),
+            ["ura", "device", "select", "kamo"].as_slice(),
+            ["ura", "device", "remove", "kamo"].as_slice(),
+            ["ura", "device", "authorize", "desuwa"].as_slice(),
+            ["ura", "device", "revoke", "desuwa"].as_slice(),
         ] {
             Cli::try_parse_from(args).expect("current command should parse");
         }

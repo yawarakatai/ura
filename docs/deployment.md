@@ -121,7 +121,6 @@ For a systemd service, set `bind` in `~/.config/ura/config.toml`:
 
 ```toml
 bind = "192.168.1.20:8765"
-receiver_url = "http://192.168.1.20:8765"
 ```
 
 Then restart:
@@ -135,8 +134,25 @@ your tailnet:
 
 ```toml
 bind = "100.x.y.z:8765"
-receiver_url = "http://100.x.y.z:8765"
 ```
+
+## Device Authorization
+
+Receiver-side authorized devices live in the SQLite database under
+`XDG_DATA_HOME` or `~/.local/share/ura/ura.db`. Once a controller has been
+authorized with `ura device authorize <name>` and added on the controller with
+`ura device add <name> <address> --token <token>`, the receiver configuration no
+longer needs one shared controller token for that device.
+
+The legacy `token` and `receiver_url` settings remain compatibility behavior:
+
+```toml
+token = "..."
+receiver_url = "http://192.168.1.20:8765"
+```
+
+The legacy token is still accepted after authorized-device lookup fails. Keep it
+only while older CLI or browser-extension settings still need it.
 
 ## Troubleshooting With journalctl
 
@@ -166,11 +182,13 @@ existing receiver before starting another one.
 
 1. On the receiver machine, choose an explicit LAN or private overlay bind
    address.
-2. Set `bind` and `receiver_url` in `~/.config/ura/config.toml`.
+2. Set `bind` in `~/.config/ura/config.toml`.
 3. Start or restart `ura serve`.
-4. From the controller device, configure the same receiver URL and token.
-5. Run `ura status` or use the browser extension.
-6. Send a short supported YouTube URL and verify that audio plays on the
+4. Run `ura device authorize <name>` on the receiver and store the shown token.
+5. From the controller device, run `ura device add <name> <address> --token <token>`.
+6. Run `ura device select <name>`.
+7. Run `ura status` or use the browser extension with its existing URL/token settings.
+8. Send a short supported YouTube URL and verify that audio plays on the
    receiver machine.
 
 Keep the receiver off public interfaces unless you are deliberately exposing it

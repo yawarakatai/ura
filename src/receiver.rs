@@ -33,9 +33,11 @@ use crate::mpv::{
     observed_status, register_playback_request, rollback_playback_request, shared_playback_state,
 };
 
-pub async fn run_serve(bind: SocketAddr, token: String) -> AnyhowResult<()> {
+pub async fn run_serve(bind: SocketAddr, token: Option<String>) -> AnyhowResult<()> {
     info!("receiver startup");
-    validate_receiver_token(&token)?;
+    if let Some(token) = &token {
+        validate_receiver_token(token)?;
+    }
     ensure_program_in_path("mpv")?;
     ensure_program_in_path("yt-dlp")?;
 
@@ -103,14 +105,14 @@ pub async fn run_serve(bind: SocketAddr, token: String) -> AnyhowResult<()> {
 
 async fn run_api(
     bind: SocketAddr,
-    token: String,
+    token: Option<String>,
     socket_path: PathBuf,
     database: Arc<Database>,
     playback_state: SharedPlaybackState,
     shutdown: oneshot::Receiver<()>,
 ) -> AnyhowResult<()> {
     let state = AppState {
-        token: Arc::from(token),
+        legacy_token: token.map(Arc::from),
         socket_path: Arc::new(socket_path),
         database,
         playback_state,
@@ -143,7 +145,7 @@ fn app(state: AppState) -> Router {
 
 #[derive(Clone)]
 struct AppState {
-    token: Arc<str>,
+    legacy_token: Option<Arc<str>>,
     socket_path: Arc<PathBuf>,
     database: Arc<Database>,
     playback_state: SharedPlaybackState,
@@ -362,7 +364,6 @@ where
 }
 
 fn authorize(headers: &HeaderMap, state: &AppState) -> std::result::Result<(), AppError> {
-    let expected = format!("Bearer {}", state.token);
     let Some(actual) = headers.get(axum::http::header::AUTHORIZATION) else {
         warn!(reason = "missing bearer token", "auth failure");
         return Err(AppError::new(
@@ -370,8 +371,31 @@ fn authorize(headers: &HeaderMap, state: &AppState) -> std::result::Result<(), A
             "missing bearer token",
         ));
     };
+    let Some(actual) = actual
+        .to_str()
+        .ok()
+        .and_then(|value| value.strip_prefix("Bearer "))
+    else {
+        warn!(reason = "invalid bearer token", "auth failure");
+        return Err(AppError::new(
+            StatusCode::UNAUTHORIZED,
+            "invalid bearer token",
+        ));
+    };
 
-    if actual.as_bytes() == expected.as_bytes() {
+    if state
+        .database
+        .authenticate_authorized_token(actual)
+        .map_err(|error| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
+    {
+        return Ok(());
+    }
+
+    if state
+        .legacy_token
+        .as_ref()
+        .is_some_and(|token| constant_time_eq(actual.as_bytes(), token.as_bytes()))
+    {
         Ok(())
     } else {
         warn!(reason = "invalid bearer token", "auth failure");
@@ -380,6 +404,16 @@ fn authorize(headers: &HeaderMap, state: &AppState) -> std::result::Result<(), A
             "invalid bearer token",
         ))
     }
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    left.iter()
+        .zip(right)
+        .fold(0_u8, |diff, (left, right)| diff | (left ^ right))
+        == 0
 }
 
 pub fn validate_receiver_token(token: &str) -> AnyhowResult<()> {
@@ -866,7 +900,7 @@ mod tests {
     fn test_state() -> (AppState, PathBuf) {
         let db_path = unique_path("receiver-history.db");
         let state = AppState {
-            token: Arc::from("0123456789abcdef0123456789abcdef"),
+            legacy_token: Some(Arc::from("0123456789abcdef0123456789abcdef")),
             socket_path: Arc::new(PathBuf::from("/tmp/ura.sock")),
             database: Arc::new(Database::open(db_path.clone()).expect("open test database")),
             playback_state: shared_playback_state(),
@@ -937,6 +971,73 @@ mod tests {
         let error = authorize(&headers, &state).expect_err("invalid token should fail");
 
         assert_eq!(error.status, StatusCode::UNAUTHORIZED);
+
+        let _ = fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn generated_authorized_token_authenticates() {
+        let (state, db_path) = test_state();
+        state
+            .database
+            .authorize_device("desuwa", "abcdef0123456789abcdef0123456789")
+            .expect("authorize device");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_static("Bearer abcdef0123456789abcdef0123456789"),
+        );
+
+        authorize(&headers, &state).expect("authorized token should pass");
+
+        let _ = fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn revoked_authorized_token_is_rejected() {
+        let (state, db_path) = test_state();
+        state
+            .database
+            .authorize_device("desuwa", "abcdef0123456789abcdef0123456789")
+            .expect("authorize device");
+        state
+            .database
+            .revoke_authorized_device("desuwa")
+            .expect("revoke device");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_static("Bearer abcdef0123456789abcdef0123456789"),
+        );
+
+        let error = authorize(&headers, &state).expect_err("revoked token should fail");
+
+        assert_eq!(error.status, StatusCode::UNAUTHORIZED);
+        let _ = fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn second_authorized_device_authenticates_independently() {
+        let (state, db_path) = test_state();
+        state
+            .database
+            .authorize_device("desuwa", "abcdef0123456789abcdef0123456789")
+            .expect("authorize first");
+        state
+            .database
+            .authorize_device("firefox", "fedcba9876543210fedcba9876543210")
+            .expect("authorize second");
+        state
+            .database
+            .revoke_authorized_device("desuwa")
+            .expect("revoke first");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_static("Bearer fedcba9876543210fedcba9876543210"),
+        );
+
+        authorize(&headers, &state).expect("second token should pass");
 
         let _ = fs::remove_file(db_path);
     }

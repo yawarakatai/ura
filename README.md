@@ -72,6 +72,12 @@ ura loop off
 ura loop track
 ura loop queue
 ura loop status
+ura device list
+ura device add kamo 192.168.1.23 --token <token>
+ura device select kamo
+ura device remove kamo
+ura device authorize desuwa
+ura device revoke desuwa
 ura config init
 ura token generate
 ```
@@ -79,6 +85,17 @@ ura token generate
 `ura loop` toggles current-track looping. `ura loop track` loops the current
 track, `ura loop queue` loops the playback queue, and `ura loop off` disables
 both.
+
+Multiple receivers can be configured manually:
+
+```bash
+ura device authorize desuwa
+ura device add kamo 192.168.1.23 --token <shown-token>
+ura device select kamo
+ura play --to kamo "https://youtu.be/..."
+```
+
+Pairing-code setup is planned but not implemented.
 
 ## Browser Extension
 

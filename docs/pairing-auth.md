@@ -123,9 +123,26 @@ The receiver stores token hashes, not raw bearer tokens. Requests still use:
 Authorization: Bearer <token>
 ```
 
-## Migration From Current Configuration
+## Current Manual Bridge
 
-Current behavior uses one shared token in `config.toml`:
+Pairing-code setup is planned. The current bridge is manual per-device
+authorization:
+
+```bash
+ura device authorize desuwa
+ura device add kamo 192.168.1.23 --token <shown-token>
+ura device select kamo
+ura play --to kamo "https://youtu.be/..."
+ura device remove kamo
+ura device revoke desuwa
+```
+
+`ura pair` will automate creation and transfer of the same per-device bearer
+credential that `device authorize` creates today.
+
+## Legacy Configuration Compatibility
+
+Legacy configuration uses one shared token in `config.toml`:
 
 ```toml
 token = "..."
@@ -133,10 +150,10 @@ receiver_url = "http://127.0.0.1:8765"
 bind = "127.0.0.1:8765"
 ```
 
-Planned migration:
+Transition behavior:
 
 - keep existing single-token configuration working during transition
-- allow pairing to create per-peer credentials alongside the existing token
+- allow manual authorization and future pairing to create per-device credentials alongside the existing token
 - provide a clear path to revoke or remove the legacy shared token later
 - avoid breaking existing local-only users without an explicit migration step
 

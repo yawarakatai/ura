@@ -1,10 +1,10 @@
 use anyhow::Result;
 use clap::Parser;
 use ura::{
-    cli::{Cli, Command, ConfigCommand, LoopCommand, TokenCommand},
+    cli::{Cli, Command, ConfigCommand, DeviceCommand, LoopCommand, TokenCommand},
     client::HttpClient,
-    config::{Config, ConfigInit, ReceiverConfig, generate_token},
-    db::HistoryEntry,
+    config::{Config, ConfigInit, DeviceConfig, ReceiverConfig, generate_token},
+    db::{Database, HistoryEntry},
     mpv::{LoopStatus, MpvStatus},
     receiver::run_serve,
 };
@@ -19,51 +19,45 @@ async fn main() -> Result<()> {
             let config = ReceiverConfig::load_with_overrides(cli.config, bind, cli.token)?;
             run_serve(config.bind, config.token).await
         }
-        Command::Play { url } => {
-            let config = Config::load_with_overrides(cli.config, cli.receiver_url, cli.token)?;
-            let client = HttpClient::new(config.receiver_url, config.token)?;
+        Command::Play { to, url } => {
+            let client = client_for(cli.config, cli.receiver_url, cli.token, to)?;
             client.play(&url)?;
             println!("play: sent {url}");
             Ok(())
         }
-        Command::Queue { url } => {
-            let config = Config::load_with_overrides(cli.config, cli.receiver_url, cli.token)?;
-            let client = HttpClient::new(config.receiver_url, config.token)?;
+        Command::Queue { to, url } => {
+            let client = client_for(cli.config, cli.receiver_url, cli.token, to)?;
             client.queue(&url)?;
             println!("queue: sent {url}");
             Ok(())
         }
-        Command::Pause => {
-            let config = Config::load_with_overrides(cli.config, cli.receiver_url, cli.token)?;
-            let client = HttpClient::new(config.receiver_url, config.token)?;
+        Command::Pause { to } => {
+            let client = client_for(cli.config, cli.receiver_url, cli.token, to)?;
             client.control("pause")?;
             println!("pause: sent");
             Ok(())
         }
-        Command::Resume => {
-            let config = Config::load_with_overrides(cli.config, cli.receiver_url, cli.token)?;
-            let client = HttpClient::new(config.receiver_url, config.token)?;
+        Command::Resume { to } => {
+            let client = client_for(cli.config, cli.receiver_url, cli.token, to)?;
             client.control("resume")?;
             println!("resume: sent");
             Ok(())
         }
-        Command::Toggle => {
-            let config = Config::load_with_overrides(cli.config, cli.receiver_url, cli.token)?;
-            let client = HttpClient::new(config.receiver_url, config.token)?;
+        Command::Toggle { to } => {
+            let client = client_for(cli.config, cli.receiver_url, cli.token, to)?;
             client.control("toggle")?;
             println!("toggle: sent");
             Ok(())
         }
-        Command::Stop => {
-            let config = Config::load_with_overrides(cli.config, cli.receiver_url, cli.token)?;
-            let client = HttpClient::new(config.receiver_url, config.token)?;
+        Command::Stop { to } => {
+            let client = client_for(cli.config, cli.receiver_url, cli.token, to)?;
             client.control("stop")?;
             println!("stop: sent");
             Ok(())
         }
-        Command::Loop { command } => {
-            let config = Config::load_with_overrides(cli.config, cli.receiver_url, cli.token)?;
-            let client = HttpClient::new(config.receiver_url, config.token)?;
+        Command::Loop { to, command } => {
+            let to = command_to_device(&to, &command);
+            let client = client_for(cli.config, cli.receiver_url, cli.token, to)?;
             match command {
                 None => {
                     let status = client.loop_status()?;
@@ -75,19 +69,19 @@ async fn main() -> Result<()> {
                         println!("loop track: sent");
                     }
                 }
-                Some(LoopCommand::Off) => {
+                Some(LoopCommand::Off { .. }) => {
                     client.control("loop-off")?;
                     println!("loop off: sent");
                 }
-                Some(LoopCommand::Track) => {
+                Some(LoopCommand::Track { .. }) => {
                     client.control("loop-one")?;
                     println!("loop track: sent");
                 }
-                Some(LoopCommand::Queue) => {
+                Some(LoopCommand::Queue { .. }) => {
                     client.control("loop-queue")?;
                     println!("loop queue: sent");
                 }
-                Some(LoopCommand::Status) => {
+                Some(LoopCommand::Status { .. }) => {
                     let status = client.loop_status()?;
                     println!("loop status: {status:?}");
                 }
@@ -118,21 +112,93 @@ async fn main() -> Result<()> {
                 Ok(())
             }
         },
-        Command::Status => {
-            let config = Config::load_with_overrides(cli.config, cli.receiver_url, cli.token)?;
-            let client = HttpClient::new(config.receiver_url, config.token)?;
+        Command::Device { command } => match command {
+            DeviceCommand::List => {
+                let devices = DeviceConfig::load(cli.config.as_deref())?;
+                let database = Database::open(ura::config::default_db_path()?)?;
+                let authorized = database.authorized_devices()?;
+                print_devices(&devices, &authorized);
+                Ok(())
+            }
+            DeviceCommand::Add {
+                name,
+                address,
+                token,
+            } => {
+                DeviceConfig::add(cli.config.as_deref(), &name, &address, &token)?;
+                println!("device added: {name}");
+                Ok(())
+            }
+            DeviceCommand::Select { name } => {
+                DeviceConfig::select(cli.config.as_deref(), &name)?;
+                println!("selected device: {name}");
+                Ok(())
+            }
+            DeviceCommand::Remove { name } => {
+                DeviceConfig::remove(cli.config.as_deref(), &name)?;
+                println!("device removed: {name}");
+                Ok(())
+            }
+            DeviceCommand::Authorize { name } => {
+                let token = generate_token()?;
+                let database = Database::open(ura::config::default_db_path()?)?;
+                database.authorize_device(&name, &token)?;
+                println!("Authorized device \"{name}\".");
+                println!();
+                println!("Token:");
+                println!("  {token}");
+                println!();
+                println!("This token is shown only once.");
+                println!("Store it on the controlling device.");
+                Ok(())
+            }
+            DeviceCommand::Revoke { name } => {
+                let database = Database::open(ura::config::default_db_path()?)?;
+                if database.revoke_authorized_device(&name)? {
+                    println!("revoked device: {name}");
+                    Ok(())
+                } else {
+                    anyhow::bail!("unknown active authorized device `{name}`")
+                }
+            }
+        },
+        Command::Status { to } => {
+            let client = client_for(cli.config, cli.receiver_url, cli.token, to)?;
             let status = client.status()?;
             print_status(&status);
             Ok(())
         }
-        Command::History => {
-            let config = Config::load_with_overrides(cli.config, cli.receiver_url, cli.token)?;
-            let client = HttpClient::new(config.receiver_url, config.token)?;
+        Command::History { to } => {
+            let client = client_for(cli.config, cli.receiver_url, cli.token, to)?;
             let history = client.history()?;
             print_history(&history);
             Ok(())
         }
     }
+}
+
+fn command_to_device(parent_to: &Option<String>, command: &Option<LoopCommand>) -> Option<String> {
+    match command {
+        Some(LoopCommand::Off { to })
+        | Some(LoopCommand::Track { to })
+        | Some(LoopCommand::Queue { to })
+        | Some(LoopCommand::Status { to }) => to.clone().or_else(|| parent_to.clone()),
+        None => parent_to.clone(),
+    }
+}
+
+fn client_for(
+    config_path: Option<std::path::PathBuf>,
+    receiver_url: Option<String>,
+    token: Option<String>,
+    to: Option<String>,
+) -> Result<HttpClient> {
+    let config = if receiver_url.is_some() || token.is_some() {
+        Config::load_with_overrides(config_path, receiver_url, token)?
+    } else {
+        Config::load_for_device(config_path, to)?
+    };
+    HttpClient::new(config.receiver_url, config.token)
 }
 
 fn print_status(status: &MpvStatus) {
@@ -193,6 +259,47 @@ fn print_history(history: &[HistoryEntry]) {
             entry.source_kind
         );
     }
+}
+
+fn print_devices(config: &DeviceConfig, authorized: &[ura::db::AuthorizedDevice]) {
+    print!("{}", render_devices(config, authorized));
+}
+
+fn render_devices(config: &DeviceConfig, authorized: &[ura::db::AuthorizedDevice]) -> String {
+    let mut output = String::new();
+    output.push_str(&format!(
+        "Selected device: {}\n\n",
+        config.selected_device.as_deref().unwrap_or("none")
+    ));
+    output.push_str("Remote devices:\n");
+    if config.devices.is_empty() {
+        if let Some(legacy) = &config.legacy_device {
+            output.push_str(&format!("  {:<12}  {} (legacy)\n", legacy.name, legacy.url));
+        } else {
+            output.push_str("  none\n");
+        }
+    } else {
+        output.push_str(&format!("  {:<12}  ADDRESS\n", "NAME"));
+        for device in &config.devices {
+            output.push_str(&format!("  {:<12}  {}\n", device.name, device.url));
+        }
+    }
+    output.push('\n');
+    output.push_str("Authorized devices:\n");
+    if authorized.is_empty() {
+        output.push_str("  none\n");
+    } else {
+        output.push_str(&format!("  {:<12}  {:<16}  LAST SEEN\n", "NAME", "CREATED"));
+        for device in authorized {
+            output.push_str(&format!(
+                "  {:<12}  {:<16}  {}\n",
+                device.name,
+                device.created_at,
+                device.last_seen_at.as_deref().unwrap_or("never")
+            ));
+        }
+    }
+    output
 }
 
 fn display_title(status: &MpvStatus) -> String {
@@ -314,6 +421,32 @@ mod tests {
     fn truncate_counts_unicode_characters() {
         assert_eq!(truncate("あいうえお", 4), "あ...");
         assert_eq!(truncate("あいう", 3), "あいう");
+    }
+
+    #[test]
+    fn device_list_rendering_hides_token_material() {
+        let config = DeviceConfig {
+            selected_device: Some("kamo".to_string()),
+            devices: vec![ura::config::RemoteDevice {
+                name: "kamo".to_string(),
+                url: "http://kamo:8765".to_string(),
+                token: "secret-token".to_string(),
+            }],
+            legacy_device: None,
+        };
+        let authorized = vec![ura::db::AuthorizedDevice {
+            name: "firefox".to_string(),
+            created_at: "2026-07-10 17:35".to_string(),
+            last_seen_at: None,
+            revoked_at: None,
+        }];
+
+        let output = render_devices(&config, &authorized);
+
+        assert!(output.contains("kamo"));
+        assert!(output.contains("firefox"));
+        assert!(!output.contains("secret-token"));
+        assert!(!output.contains("token_hash"));
     }
 }
 

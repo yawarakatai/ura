@@ -7,6 +7,7 @@ use std::{
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::mpv::MediaMetadata;
 
@@ -27,6 +28,14 @@ pub struct HistoryEntry {
     pub created_at: String,
     pub last_played_at: Option<String>,
     pub play_count: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthorizedDevice {
+    pub name: String,
+    pub created_at: String,
+    pub last_seen_at: Option<String>,
+    pub revoked_at: Option<String>,
 }
 
 impl Database {
@@ -193,6 +202,75 @@ impl Database {
             .with_context(|| "failed to read playback history")
     }
 
+    pub fn authorize_device(&self, name: &str, token: &str) -> Result<()> {
+        validate_device_name(name)?;
+        let token_hash = hash_token(token);
+        let conn = self.connect()?;
+        conn.execute(
+            "INSERT INTO authorized_devices (name, token_hash, created_at)
+             VALUES (?1, ?2, ?3)",
+            params![name, token_hash, now_text()],
+        )
+        .with_context(|| format!("failed to authorize device `{name}`"))?;
+        Ok(())
+    }
+
+    pub fn revoke_authorized_device(&self, name: &str) -> Result<bool> {
+        validate_device_name(name)?;
+        let conn = self.connect()?;
+        let changed = conn
+            .execute(
+                "UPDATE authorized_devices
+                 SET revoked_at = COALESCE(revoked_at, ?1)
+                 WHERE name = ?2 AND revoked_at IS NULL",
+                params![now_text(), name],
+            )
+            .with_context(|| format!("failed to revoke device `{name}`"))?;
+        Ok(changed > 0)
+    }
+
+    pub fn authorized_devices(&self) -> Result<Vec<AuthorizedDevice>> {
+        let conn = self.connect()?;
+        let mut statement = conn.prepare(
+            "SELECT name, created_at, last_seen_at, revoked_at
+             FROM authorized_devices
+             WHERE revoked_at IS NULL
+             ORDER BY name",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(AuthorizedDevice {
+                name: row.get(0)?,
+                created_at: row.get(1)?,
+                last_seen_at: row.get(2)?,
+                revoked_at: row.get(3)?,
+            })
+        })?;
+
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .with_context(|| "failed to read authorized devices")
+    }
+
+    pub fn authenticate_authorized_token(&self, token: &str) -> Result<bool> {
+        let token_hash = hash_token(token);
+        let conn = self.connect()?;
+        let mut statement = conn.prepare(
+            "SELECT id, token_hash, last_seen_at
+             FROM authorized_devices
+             WHERE revoked_at IS NULL",
+        )?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let id: i64 = row.get(0)?;
+            let stored_hash: String = row.get(1)?;
+            let last_seen_at: Option<String> = row.get(2)?;
+            if constant_time_eq(token_hash.as_bytes(), stored_hash.as_bytes()) {
+                update_last_seen_if_stale(&conn, id, last_seen_at.as_deref())?;
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     fn init(&self) -> Result<()> {
         let conn = self.connect()?;
         conn.execute_batch(
@@ -216,7 +294,20 @@ impl Database {
                 played_at TEXT NOT NULL,
                 source TEXT,
                 FOREIGN KEY(track_id) REFERENCES tracks(id)
-            );",
+            );
+
+            CREATE TABLE IF NOT EXISTS authorized_devices (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                token_hash TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                last_seen_at TEXT,
+                revoked_at TEXT
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS authorized_devices_active_name_idx
+                ON authorized_devices(name)
+                WHERE revoked_at IS NULL;",
         )
         .with_context(|| "failed to initialize playback history database")
     }
@@ -225,6 +316,59 @@ impl Database {
         Connection::open(&self.path)
             .with_context(|| format!("failed to open database {}", self.path.display()))
     }
+}
+
+pub fn hash_token(token: &str) -> String {
+    hex_encode(&Sha256::digest(token.as_bytes()))
+}
+
+pub fn validate_device_name(name: &str) -> Result<()> {
+    if name.trim().is_empty() {
+        anyhow::bail!("device name must not be empty");
+    }
+    Ok(())
+}
+
+fn update_last_seen_if_stale(conn: &Connection, id: i64, last_seen_at: Option<&str>) -> Result<()> {
+    let now = now_text();
+    let should_update = last_seen_at
+        .and_then(|value| value.parse::<u64>().ok())
+        .and_then(|last_seen| {
+            now.parse::<u64>()
+                .ok()
+                .map(|now| now.saturating_sub(last_seen))
+        })
+        .map(|age| age >= 60)
+        .unwrap_or(true);
+
+    if should_update {
+        conn.execute(
+            "UPDATE authorized_devices SET last_seen_at = ?1 WHERE id = ?2",
+            params![now, id],
+        )
+        .with_context(|| "failed to update authorized device last_seen_at")?;
+    }
+    Ok(())
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    left.iter()
+        .zip(right)
+        .fold(0_u8, |diff, (left, right)| diff | (left ^ right))
+        == 0
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
 }
 
 fn now_text() -> String {
@@ -440,6 +584,117 @@ mod tests {
                 .update_track_metadata("https://youtu.be/example", &metadata)
                 .expect("second update")
         );
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn authorized_device_tokens_authenticate_and_revoke() {
+        let path = unique_db_path("authorized-device");
+        let database = Database::open(path.clone()).expect("open database");
+
+        database
+            .authorize_device("desuwa", "0123456789abcdef0123456789abcdef")
+            .expect("authorize device");
+
+        assert!(
+            database
+                .authenticate_authorized_token("0123456789abcdef0123456789abcdef")
+                .expect("authenticate")
+        );
+        assert!(
+            !database
+                .authenticate_authorized_token("wrong-wrong-wrong-wrong-wrong-wrong")
+                .expect("authenticate wrong")
+        );
+        assert!(database.revoke_authorized_device("desuwa").expect("revoke"));
+        assert!(
+            !database
+                .authenticate_authorized_token("0123456789abcdef0123456789abcdef")
+                .expect("authenticate revoked")
+        );
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn authorized_devices_store_hashes_and_last_seen() {
+        let path = unique_db_path("authorized-device-hash");
+        let database = Database::open(path.clone()).expect("open database");
+        let token = "abcdef0123456789abcdef0123456789";
+
+        database
+            .authorize_device("firefox", token)
+            .expect("authorize device");
+        assert!(
+            database
+                .authenticate_authorized_token(token)
+                .expect("authenticate")
+        );
+
+        let conn = Connection::open(&path).expect("open raw connection");
+        let (token_hash, last_seen_at): (String, Option<String>) = conn
+            .query_row(
+                "SELECT token_hash, last_seen_at FROM authorized_devices WHERE name = 'firefox'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read authorized row");
+        assert_ne!(token_hash, token);
+        assert_eq!(token_hash, hash_token(token));
+        assert!(last_seen_at.is_some());
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn failed_authentication_does_not_update_last_seen() {
+        let path = unique_db_path("authorized-device-failed");
+        let database = Database::open(path.clone()).expect("open database");
+
+        database
+            .authorize_device("firefox", "abcdef0123456789abcdef0123456789")
+            .expect("authorize device");
+        assert!(
+            !database
+                .authenticate_authorized_token("wrong-wrong-wrong-wrong-wrong-wrong")
+                .expect("authenticate wrong")
+        );
+
+        let conn = Connection::open(&path).expect("open raw connection");
+        let last_seen_at: Option<String> = conn
+            .query_row(
+                "SELECT last_seen_at FROM authorized_devices WHERE name = 'firefox'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read authorized row");
+        assert_eq!(last_seen_at, None);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn authorized_device_migration_preserves_history() {
+        let path = unique_db_path("authorized-device-migration");
+        let database = Database::open(path.clone()).expect("open database");
+        database
+            .record_play(
+                "https://youtu.be/example",
+                "https://youtu.be/example",
+                Some("cli"),
+            )
+            .expect("record play");
+        drop(database);
+
+        let database = Database::open(path.clone()).expect("reopen database");
+        database
+            .authorize_device("desuwa", "0123456789abcdef0123456789abcdef")
+            .expect("authorize");
+
+        let history = database.history().expect("history");
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].source_url, "https://youtu.be/example");
 
         let _ = fs::remove_file(path);
     }

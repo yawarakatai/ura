@@ -104,6 +104,17 @@ network access and upstream availability. When running one, verify playback
 starts without a second metadata command, then check that `ura status` and
 `ura history` show a real title and never print literal `null`.
 
+## Multi-Device/Auth Verification
+
+Use isolated XDG directories before manual multi-device testing so local
+configuration and receiver history are untouched. Verify `device add`, `device
+select`, `device remove`, and `--to` destination override behavior. On the
+receiver side, verify that `device authorize` prints a token once, authorized
+tokens authenticate, `device revoke` rejects only the revoked token, the legacy
+configured token still works, and no token or token hash appears in normal
+output or logs. Successful authorized-device authentication updates
+`last_seen_at` no more than once per 60 seconds.
+
 ## Firefox Temporary Extension Testing
 
 1. Open Firefox.
