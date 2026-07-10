@@ -11,7 +11,7 @@ expected toolchain or runtime tools.
 nix develop
 ```
 
-The shell includes Rust tooling plus `mpv`, `yt-dlp`, and SQLite.
+The shell includes Rust tooling plus Node.js, `mpv`, `yt-dlp`, and SQLite.
 
 You can also run one command inside the shell:
 
@@ -27,6 +27,7 @@ Run focused checks while developing:
 nix develop -c cargo fmt --check
 nix develop -c cargo clippy -- -D warnings
 nix develop -c cargo test
+nix develop -c node --test extension/lib.test.js
 nix develop -c nix flake check
 ```
 
@@ -36,13 +37,14 @@ The full local gate is:
 nix develop -c ./scripts/verify.sh
 ```
 
-`scripts/verify.sh` checks for `mpv`, `yt-dlp`, and `sqlite3`, then runs:
+`scripts/verify.sh` checks for `mpv`, `node`, `yt-dlp`, and `sqlite3`, then runs:
 
 1. `cargo fmt --check`
 2. `cargo clippy -- -D warnings`
 3. `cargo test`
 4. `cargo check --all-targets`
-5. `nix flake check`
+5. `node --test extension/lib.test.js`
+6. `nix flake check`
 
 ## Local Real-Audio Smoke Test
 

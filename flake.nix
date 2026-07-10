@@ -25,6 +25,7 @@
               inputs'.fenix.packages.stable.toolchain
               inputs'.fenix.packages.stable.rust-analyzer
               pkgs.mpv
+              pkgs.nodejs_22
               pkgs.sqlite
               pkgs.yt-dlp
             ];
