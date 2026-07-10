@@ -28,7 +28,7 @@ impl HttpClient {
         self.post_json("/v1/play", &PlayRequest { url, source: "cli" })
     }
 
-    pub fn enqueue(&self, url: &str) -> Result<()> {
+    pub fn queue(&self, url: &str) -> Result<()> {
         self.post_json("/v1/enqueue", &PlayRequest { url, source: "cli" })
     }
 
@@ -255,9 +255,9 @@ mod tests {
     }
 
     #[test]
-    fn enqueue_uses_http_api() {
+    fn queue_uses_append_http_api() {
         let request = capture_request(r#"{"ok":true}"#, |client| {
-            client.enqueue("https://youtu.be/example")
+            client.queue("https://youtu.be/example")
         });
 
         assert_request_line(&request, "POST /v1/enqueue HTTP/1.1");

@@ -51,7 +51,7 @@ Use a real receiver and client in separate terminals:
 ```bash
 nix develop
 cargo run -- config init
-cargo run -- receive
+cargo run -- serve
 ```
 
 Then:
@@ -76,7 +76,7 @@ validation, and client request construction.
 
 When manually testing with a fake or wrapped `mpv`, keep the fake earlier in
 `PATH` only for that shell and make sure it accepts the arguments used by
-`ura receive`.
+`ura serve`.
 
 ## Firefox Temporary Extension Testing
 
@@ -86,7 +86,7 @@ When manually testing with a fake or wrapped `mpv`, keep the fake earlier in
 4. Select `extension/manifest.json`.
 5. Open the extension options.
 6. Set receiver URL, token, and default action.
-7. Start `ura receive`.
+7. Start `ura serve`.
 8. Open a supported YouTube URL and click the toolbar button.
 
 The extension uses local storage for settings and sends the current tab URL to
@@ -94,14 +94,14 @@ The extension uses local storage for settings and sends the current tab URL to
 
 ## Logging
 
-`ura receive` initializes tracing with `RUST_LOG` support. If `RUST_LOG` is not
+`ura serve` initializes tracing with `RUST_LOG` support. If `RUST_LOG` is not
 set, it defaults to `ura=info`.
 
 Examples:
 
 ```bash
-RUST_LOG=ura=debug cargo run -- receive
-RUST_LOG=ura=info ura receive
+RUST_LOG=ura=debug cargo run -- serve
+RUST_LOG=ura=info ura serve
 ```
 
 Logs should avoid printing full secrets. URL validation logs sanitized host and

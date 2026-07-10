@@ -3,7 +3,7 @@
 ## Project
 
 `ura` is a small personal audio receiver for Linux/NixOS. A CLI or browser
-extension sends a supported YouTube URL to `ura receive`; the receiver controls
+extension sends a supported YouTube URL to `ura serve`; the receiver controls
 `mpv` over local JSON IPC and plays audio only.
 
 Keep the project small, boring, explicit, and useful.
@@ -13,7 +13,7 @@ Keep the project small, boring, explicit, and useful.
 ```text
 browser extension / CLI
   -> HTTP API with bearer-token auth
-  -> ura receive
+  -> ura serve
   -> local mpv JSON IPC
   -> audio-only playback
 ```

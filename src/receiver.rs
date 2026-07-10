@@ -30,7 +30,7 @@ use crate::config::{default_db_path, default_mpv_socket_path};
 use crate::db::{Database, HistoryEntry};
 use crate::mpv::{LoopMode, LoopStatus, MpvClient};
 
-pub async fn run_receive(bind: SocketAddr, token: String) -> AnyhowResult<()> {
+pub async fn run_serve(bind: SocketAddr, token: String) -> AnyhowResult<()> {
     info!("receiver startup");
     validate_receiver_token(&token)?;
     ensure_program_in_path("mpv")?;

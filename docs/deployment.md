@@ -2,13 +2,13 @@
 
 Status: Current behavior.
 
-This document covers installing and running `ura receive` as a long-lived local
+This document covers installing and running `ura serve` as a long-lived local
 receiver. Tailscale can be used as an optional private network, but it is not a
 project requirement.
 
 ## systemd User Service
 
-`contrib/systemd/` contains example files for running `ura receive` as a systemd
+`contrib/systemd/` contains example files for running `ura serve` as a systemd
 user service:
 
 - `contrib/systemd/ura.service`
@@ -40,7 +40,7 @@ journalctl --user -u ura.service -f
 The service runs:
 
 ```ini
-ExecStart=ura receive
+ExecStart=ura serve
 ```
 
 The optional `~/.config/ura/ura.env` file is for process environment such as
@@ -65,7 +65,7 @@ The systemd user service must be able to find:
 
 If `ura` is not in the PATH seen by systemd user services, install it into your
 profile or change `ExecStart` to the absolute path of the binary. `mpv` and
-`yt-dlp` must also be available in the service environment because `ura receive`
+`yt-dlp` must also be available in the service environment because `ura serve`
 checks them at startup and `mpv` uses `yt-dlp` for supported media URLs.
 
 ## NixOS And Home Manager
@@ -88,7 +88,7 @@ systemd.user.services.ura = {
     Environment = [
       "RUST_LOG=ura=info"
     ];
-    ExecStart = "${pkgs.ura}/bin/ura receive";
+    ExecStart = "${pkgs.ura}/bin/ura serve";
     Restart = "on-failure";
     RestartSec = 2;
   };
@@ -114,7 +114,7 @@ To expose the receiver to another device on a LAN or private overlay network,
 set an explicit bind address:
 
 ```bash
-ura receive --bind 192.168.1.20:8765
+ura serve --bind 192.168.1.20:8765
 ```
 
 For a systemd service, set `bind` in `~/.config/ura/config.toml`:
@@ -167,7 +167,7 @@ existing receiver before starting another one.
 1. On the receiver machine, choose an explicit LAN or private overlay bind
    address.
 2. Set `bind` and `receiver_url` in `~/.config/ura/config.toml`.
-3. Start or restart `ura receive`.
+3. Start or restart `ura serve`.
 4. From the controller device, configure the same receiver URL and token.
 5. Run `ura status` or use the browser extension.
 6. Send a short supported YouTube URL and verify that audio plays on the

@@ -7,7 +7,7 @@ Status: Current behavior.
 ```text
 browser extension / CLI
   -> HTTP API with bearer-token auth
-  -> ura receive
+  -> ura serve
   -> local mpv JSON IPC socket
   -> audio-only playback
 ```
@@ -20,9 +20,11 @@ incoming URLs, sends playback commands to `mpv`, and records history in SQLite.
 The same binary provides receiver and controller commands:
 
 ```bash
-ura receive
+ura serve
 ura play "https://youtu.be/..."
-ura enqueue "https://youtu.be/..."
+ura queue "https://youtu.be/..."
+ura pause
+ura resume
 ura toggle
 ura stop
 ura status
@@ -46,14 +48,14 @@ the configured receiver. Extension settings are:
 
 - receiver URL
 - token
-- default action: `play` or `enqueue`
+- default action: `play` or `queue`
 
 The extension uses `Authorization: Bearer <token>` and sends either
 `POST /v1/play` or `POST /v1/enqueue`.
 
 ## HTTP Receiver
 
-`ura receive`:
+`ura serve`:
 
 1. validates the configured token
 2. checks that `mpv` and `yt-dlp` are available in `PATH`
@@ -168,7 +170,7 @@ Configuration priority for controller commands is:
 2. environment variables: `URA_RECEIVER_URL`, `URA_TOKEN`
 3. `config.toml`
 
-Configuration priority for `ura receive` is:
+Configuration priority for `ura serve` is:
 
 1. CLI flags
 2. environment variables: `URA_BIND`, `URA_TOKEN`

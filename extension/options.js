@@ -28,5 +28,6 @@ async function restoreOptions() {
   const settings = await api.storage.local.get(DEFAULT_SETTINGS);
   receiverUrl.value = settings.receiverUrl;
   token.value = settings.token;
-  defaultAction.value = settings.defaultAction;
+  defaultAction.value =
+    settings.defaultAction === "enqueue" ? "queue" : settings.defaultAction;
 }

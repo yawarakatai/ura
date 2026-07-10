@@ -42,17 +42,40 @@ Planned receiver flow:
 The raw bearer token is shown or returned only during pairing and cannot be
 recovered from receiver storage later.
 
-## Controller Workflow: `ura connect`
+## Controller Workflow: `ura pair <ADDRESS>`
 
 Planned controller CLI flow:
 
-1. The user runs `ura connect <receiver-address>`.
+1. The user runs `ura pair <receiver-address>`.
 2. The controller normalizes the address.
 3. The controller prompts for the six-digit code shown by the receiver.
 4. On success, the controller stores the receiver URL and issued bearer token.
 
 Controllers may store multiple receivers. Each receiver entry has its own URL
 and bearer token.
+
+## Planned Device Commands
+
+These commands are planned and are not implemented in the current CLI:
+
+```text
+ura pair
+ura pair <ADDRESS>
+ura device list
+ura device select <NAME>
+ura device remove <NAME>
+ura play --to <NAME> <URL>
+ura queue --to <NAME> <URL>
+```
+
+`ura pair` opens pairing on the local receiver. `ura pair <ADDRESS>` pairs this
+controller or extension with the specified receiver.
+
+`ura device list` lists known remote receivers and devices authorized to control
+the local receiver. `ura device select <NAME>` persistently selects the device
+used when `--to` is omitted. `ura device remove <NAME>` removes a known remote
+device or revokes a locally authorized device. `--to <NAME>` overrides the
+selected destination for one command.
 
 ## Browser Extension Workflow
 
@@ -89,9 +112,10 @@ http://host:8765/ura  -> http://host:8765/ura
 
 ## Token Model
 
-Pairing issues per-pair bearer tokens. A receiver can have multiple paired
-peers, and each peer has an independent token. A controller can store multiple
-receivers.
+Pairing issues per-device bearer tokens. A receiver can have multiple paired
+devices, and each device has an independent token. A controller can store
+multiple receiver devices. Internal implementation details may still use `peer`
+where technically appropriate.
 
 The receiver stores token hashes, not raw bearer tokens. Requests still use:
 

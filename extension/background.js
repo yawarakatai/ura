@@ -16,7 +16,7 @@ api.browserAction.onClicked.addListener(async (tab) => {
       throw new Error("current tab has no URL");
     }
 
-    const action = settings.defaultAction === "enqueue" ? "enqueue" : "play";
+    const action = settings.defaultAction === "queue" ? "enqueue" : "play";
     const endpoint = `${trimTrailingSlash(settings.receiverUrl)}/v1/${action}`;
     const response = await fetch(endpoint, {
       method: "POST",
@@ -46,7 +46,10 @@ async function loadSettings() {
   return {
     receiverUrl: stored.receiverUrl || DEFAULT_SETTINGS.receiverUrl,
     token: stored.token || DEFAULT_SETTINGS.token,
-    defaultAction: stored.defaultAction || DEFAULT_SETTINGS.defaultAction,
+    defaultAction:
+      stored.defaultAction === "enqueue"
+        ? "queue"
+        : stored.defaultAction || DEFAULT_SETTINGS.defaultAction,
   };
 }
 

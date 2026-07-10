@@ -5,7 +5,7 @@ use ura::{
     client::HttpClient,
     config::{Config, ConfigInit, ReceiverConfig, generate_token},
     mpv::LoopStatus,
-    receiver::run_receive,
+    receiver::run_serve,
 };
 
 #[tokio::main]
@@ -13,10 +13,10 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Receive { bind } => {
-            init_receive_logging();
+        Command::Serve { bind } => {
+            init_serve_logging();
             let config = ReceiverConfig::load_with_overrides(cli.config, bind, cli.token)?;
-            run_receive(config.bind, config.token).await
+            run_serve(config.bind, config.token).await
         }
         Command::Play { url } => {
             let config = Config::load_with_overrides(cli.config, cli.receiver_url, cli.token)?;
@@ -25,11 +25,25 @@ async fn main() -> Result<()> {
             println!("play: sent {url}");
             Ok(())
         }
-        Command::Enqueue { url } => {
+        Command::Queue { url } => {
             let config = Config::load_with_overrides(cli.config, cli.receiver_url, cli.token)?;
             let client = HttpClient::new(config.receiver_url, config.token)?;
-            client.enqueue(&url)?;
-            println!("enqueue: sent {url}");
+            client.queue(&url)?;
+            println!("queue: sent {url}");
+            Ok(())
+        }
+        Command::Pause => {
+            let config = Config::load_with_overrides(cli.config, cli.receiver_url, cli.token)?;
+            let client = HttpClient::new(config.receiver_url, config.token)?;
+            client.control("pause")?;
+            println!("pause: sent");
+            Ok(())
+        }
+        Command::Resume => {
+            let config = Config::load_with_overrides(cli.config, cli.receiver_url, cli.token)?;
+            let client = HttpClient::new(config.receiver_url, config.token)?;
+            client.control("resume")?;
+            println!("resume: sent");
             Ok(())
         }
         Command::Toggle => {
@@ -120,7 +134,7 @@ async fn main() -> Result<()> {
     }
 }
 
-fn init_receive_logging() {
+fn init_serve_logging() {
     use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
     let env_filter =

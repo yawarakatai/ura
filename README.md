@@ -11,7 +11,7 @@ cloud sync.
 ## Current Functionality
 
 - run a local HTTP receiver with bearer-token authentication
-- play or enqueue supported YouTube URLs
+- play or queue supported YouTube URLs
 - control pause/resume, stop, and loop mode
 - report basic `mpv` status
 - store playback history in SQLite
@@ -37,7 +37,7 @@ The Nix development shell includes the needed runtime tools.
 ```bash
 nix develop
 cargo run -- config init
-cargo run -- receive
+cargo run -- serve
 ```
 
 In another terminal:
@@ -51,16 +51,18 @@ Installed binary usage is the same without `cargo run --`:
 
 ```bash
 ura config init
-ura receive
+ura serve
 ura play "https://youtu.be/..."
 ```
 
 ## CLI
 
 ```bash
-ura receive
+ura serve
 ura play "https://youtu.be/..."
-ura enqueue "https://youtu.be/..."
+ura queue "https://youtu.be/..."
+ura pause
+ura resume
 ura toggle
 ura stop
 ura status
@@ -84,7 +86,7 @@ Load `extension/` temporarily in Firefox, open the extension options, and set:
 
 - receiver URL
 - token
-- default action: `play` or `enqueue`
+- default action: `play` or `queue`
 
 Click the toolbar button to send the current tab URL to the configured receiver.
 
@@ -94,7 +96,7 @@ The receiver defaults to `127.0.0.1:8765`. Bind to a LAN or Tailscale address
 only when you intend to expose the receiver to that network:
 
 ```bash
-ura receive --bind 192.168.1.20:8765
+ura serve --bind 192.168.1.20:8765
 ```
 
 The HTTP API requires `Authorization: Bearer <token>`. The `mpv` IPC socket is a
