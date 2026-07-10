@@ -47,11 +47,6 @@ in
         After = [ "network.target" ];
       };
 
-      path = [
-        pkgs.mpv
-        pkgs.yt-dlp
-      ];
-
       Service = {
         Type = "simple";
 
@@ -64,6 +59,7 @@ in
 
         Environment = [
           "RUST_LOG=${cfg.logLevel}"
+          "PATH=${lib.makeBinPath [ pkgs.mpv pkgs.yt-dlp ]}"
         ];
 
         Restart = "on-failure";
