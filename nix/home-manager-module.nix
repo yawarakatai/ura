@@ -10,6 +10,10 @@
 let
   cfg = config.services.ura;
   system = pkgs.stdenv.hostPlatform.system;
+
+  mpvWithMpris = pkgs.mpv.override {
+    scripts = [ pkgs.mpvScripts.mpris ];
+  };
 in
 {
   options.services.ura = {
@@ -59,7 +63,12 @@ in
 
         Environment = [
           "RUST_LOG=${cfg.logLevel}"
-          "PATH=${lib.makeBinPath [ pkgs.mpv pkgs.yt-dlp ]}"
+          "PATH=${
+            lib.makeBinPath [
+              mpvWithMpris
+              pkgs.yt-dlp
+            ]
+          }"
         ];
 
         Restart = "on-failure";
