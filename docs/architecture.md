@@ -13,7 +13,8 @@ browser extension / CLI
 ```
 
 The receiver starts and supervises `mpv`, exposes a small HTTP API, validates
-incoming URLs, sends playback commands to `mpv`, and records history in SQLite.
+incoming URLs, sends playback commands to `mpv`, observes `mpv` playback events,
+and records history in SQLite.
 
 ## CLI
 
@@ -102,8 +103,9 @@ loop-queue
 loop-status
 ```
 
-`GET /v1/status` returns basic `mpv` status fields. `GET /v1/history` returns
-stored track history ordered by recent playback.
+`GET /v1/status` returns the receiver's observed playback state with normalized
+metadata and loop status. `GET /v1/history` returns stored track history ordered
+by recent playback.
 
 ## mpv JSON IPC
 
@@ -121,6 +123,50 @@ The IPC endpoint is a local Unix socket. It is never exposed over TCP.
 Playback uses `mpv` JSON IPC commands. User-supplied URLs are sent as JSON
 command arguments and are not passed through a shell.
 
+The receiver keeps a persistent JSON IPC observer connection open for structured
+events and property changes. It observes:
+
+```text
+media-title
+duration
+metadata
+path
+pause
+idle-active
+playlist-pos
+playlist-count
+time-pos
+```
+
+Normal playback commands use request IDs so command responses are not confused
+with asynchronous events. Unknown events and properties are ignored. Malformed
+IPC messages are logged by the observer and do not stop the receiver when the
+observer can keep reading.
+
+On `file-loaded`, the receiver reads a coherent metadata snapshot from `mpv` and
+associates the loaded item with a pending play or queue request. Later
+`property-change` events can enrich the same current-track metadata. The
+receiver does not parse human-readable `mpv` logs and does not run a second
+blocking `yt-dlp` extraction for metadata.
+
+Normalized metadata fields are:
+
+```text
+source_url
+playback_path
+title
+artist
+uploader
+album
+duration_seconds
+thumbnail_url
+```
+
+Metadata keys from `mpv` are matched case-insensitively. Empty values do not
+replace useful existing values. If `media-title` is only the source URL or
+playback path, it is treated as a display fallback rather than authoritative
+title metadata.
+
 ## SQLite History
 
 Playback history is stored in SQLite. The current schema has `tracks` and
@@ -130,6 +176,12 @@ individual play events and their optional source label.
 
 For current YouTube URL playback, `source_url` is the URL received from the
 caller and `play_url` is the validated URL passed to `mpv`.
+
+The receiver records a play when `mpv` emits `file-loaded`, not merely when the
+HTTP request is accepted. This keeps failed loads out of successful playback
+history. Metadata enrichment updates the existing `tracks` row for the canonical
+source URL without rewriting the historical play time. Replaying the same URL
+increments play count and can refresh missing metadata.
 
 ## XDG Paths
 

@@ -8,6 +8,8 @@ use anyhow::{Context, Result};
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
+use crate::mpv::MediaMetadata;
+
 #[derive(Debug, Clone)]
 pub struct Database {
     path: PathBuf,
@@ -82,6 +84,32 @@ impl Database {
         )?;
 
         tx.commit()?;
+        Ok(())
+    }
+
+    pub fn update_track_metadata(&self, source_url: &str, metadata: &MediaMetadata) -> Result<()> {
+        let conn = self.connect()?;
+        let title = clean_optional(metadata.title.as_deref());
+        let uploader = clean_optional(metadata.uploader.as_deref().or(metadata.artist.as_deref()));
+        let thumbnail_url = clean_optional(metadata.thumbnail_url.as_deref());
+        conn.execute(
+            "UPDATE tracks
+             SET title = COALESCE(NULLIF(?1, ''), title),
+                 uploader = COALESCE(NULLIF(?2, ''), uploader),
+                 duration = COALESCE(?3, duration),
+                 thumbnail_url = COALESCE(NULLIF(?4, ''), thumbnail_url)
+             WHERE source_url = ?5",
+            params![
+                title,
+                uploader,
+                metadata
+                    .duration_seconds
+                    .map(|duration| duration.round() as i64),
+                thumbnail_url,
+                source_url,
+            ],
+        )
+        .with_context(|| "failed to update track metadata")?;
         Ok(())
     }
 
@@ -162,6 +190,13 @@ fn now_text() -> String {
         .expect("system time before UNIX_EPOCH")
         .as_secs()
         .to_string()
+}
+
+fn clean_optional(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 #[cfg(test)]
@@ -248,6 +283,83 @@ mod tests {
             history[0].play_url,
             "https://www.youtube.com/watch?v=example"
         );
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn metadata_update_enriches_existing_track() {
+        let path = unique_db_path("metadata");
+        let database = Database::open(path.clone()).expect("open database");
+
+        database
+            .record_play(
+                "https://youtu.be/example",
+                "https://youtu.be/example",
+                Some("cli"),
+            )
+            .expect("record play");
+        database
+            .update_track_metadata(
+                "https://youtu.be/example",
+                &MediaMetadata {
+                    title: Some("Example song".to_string()),
+                    uploader: Some("Example artist".to_string()),
+                    duration_seconds: Some(222.5),
+                    thumbnail_url: Some("https://i.ytimg.com/vi/example/hqdefault.jpg".to_string()),
+                    ..MediaMetadata::default()
+                },
+            )
+            .expect("update metadata");
+
+        let history = database.history().expect("read history");
+        assert_eq!(history[0].title.as_deref(), Some("Example song"));
+        assert_eq!(history[0].uploader.as_deref(), Some("Example artist"));
+        assert_eq!(history[0].duration, Some(223));
+        assert_eq!(
+            history[0].thumbnail_url.as_deref(),
+            Some("https://i.ytimg.com/vi/example/hqdefault.jpg")
+        );
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn empty_metadata_does_not_overwrite_useful_metadata() {
+        let path = unique_db_path("metadata-preserve");
+        let database = Database::open(path.clone()).expect("open database");
+
+        database
+            .record_play(
+                "https://youtu.be/example",
+                "https://youtu.be/example",
+                Some("cli"),
+            )
+            .expect("record play");
+        database
+            .update_track_metadata(
+                "https://youtu.be/example",
+                &MediaMetadata {
+                    title: Some("Useful title".to_string()),
+                    duration_seconds: Some(42.0),
+                    ..MediaMetadata::default()
+                },
+            )
+            .expect("set metadata");
+        database
+            .update_track_metadata(
+                "https://youtu.be/example",
+                &MediaMetadata {
+                    title: Some("   ".to_string()),
+                    duration_seconds: None,
+                    ..MediaMetadata::default()
+                },
+            )
+            .expect("empty metadata update");
+
+        let history = database.history().expect("read history");
+        assert_eq!(history[0].title.as_deref(), Some("Useful title"));
+        assert_eq!(history[0].duration, Some(42));
 
         let _ = fs::remove_file(path);
     }

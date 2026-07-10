@@ -28,7 +28,10 @@ use tracing::{error, info, warn};
 
 use crate::config::{default_db_path, default_mpv_socket_path};
 use crate::db::{Database, HistoryEntry};
-use crate::mpv::{LoopMode, LoopStatus, MpvClient};
+use crate::mpv::{
+    LoopMode, LoopStatus, MpvClient, MpvEventObserver, QueueMode, SharedPlaybackState,
+    observed_status, register_playback_request, rollback_playback_request, shared_playback_state,
+};
 
 pub async fn run_serve(bind: SocketAddr, token: String) -> AnyhowResult<()> {
     info!("receiver startup");
@@ -39,15 +42,28 @@ pub async fn run_serve(bind: SocketAddr, token: String) -> AnyhowResult<()> {
     let socket_path = default_mpv_socket_path()?;
     info!(socket_path = %socket_path.display(), "mpv IPC socket path");
     create_runtime_dir(&socket_path)?;
-    let database = Database::open(default_db_path()?)?;
+    let database = Arc::new(Database::open(default_db_path()?)?);
+    let playback_state = shared_playback_state();
 
     let receiver = Receiver::start(socket_path)?;
     let (socket_path, mut mpv_shutdown, mut mpv_task) = receiver.into_parts();
+    let _mpv_observer = MpvEventObserver::start(
+        socket_path.clone(),
+        Arc::clone(&database),
+        Arc::clone(&playback_state),
+    );
     info!(bind = %bind, "HTTP receiver bind address");
 
     let (api_shutdown, api_shutdown_rx) = oneshot::channel();
     let mut api_shutdown = Some(api_shutdown);
-    let mut api_task = tokio::spawn(run_api(bind, token, socket_path, database, api_shutdown_rx));
+    let mut api_task = tokio::spawn(run_api(
+        bind,
+        token,
+        socket_path,
+        database,
+        playback_state,
+        api_shutdown_rx,
+    ));
 
     tokio::select! {
         result = &mut mpv_task => {
@@ -89,13 +105,15 @@ async fn run_api(
     bind: SocketAddr,
     token: String,
     socket_path: PathBuf,
-    database: Database,
+    database: Arc<Database>,
+    playback_state: SharedPlaybackState,
     shutdown: oneshot::Receiver<()>,
 ) -> AnyhowResult<()> {
     let state = AppState {
         token: Arc::from(token),
         socket_path: Arc::new(socket_path),
-        database: Arc::new(database),
+        database,
+        playback_state,
     };
     let app = app(state);
     let listener = TcpListener::bind(bind)
@@ -128,6 +146,7 @@ struct AppState {
     token: Arc<str>,
     socket_path: Arc<PathBuf>,
     database: Arc<Database>,
+    playback_state: SharedPlaybackState,
 }
 
 #[derive(Debug, Deserialize)]
@@ -192,13 +211,23 @@ async fn play(
     let play_url = validate_supported_url(&request.url)?;
     let source_url = request.url;
     let source = request.source;
+    register_playback_request(
+        &state.playback_state,
+        source_url.clone(),
+        play_url.clone(),
+        source.clone(),
+        QueueMode::Replace,
+    );
 
-    run_mpv_command(state.clone(), {
+    let result = run_mpv_command(state.clone(), {
         let play_url = play_url.clone();
         move |client| client.load_replace(&play_url)
     })
-    .await?;
-    record_history(state, source_url, play_url, source).await?;
+    .await;
+    if result.is_err() {
+        rollback_playback_request(&state.playback_state, &play_url);
+    }
+    result?;
     Ok(Json(OkResponse { ok: true }))
 }
 
@@ -210,13 +239,23 @@ async fn enqueue(
     let play_url = validate_supported_url(&request.url)?;
     let source_url = request.url;
     let source = request.source;
+    register_playback_request(
+        &state.playback_state,
+        source_url.clone(),
+        play_url.clone(),
+        source.clone(),
+        QueueMode::Append,
+    );
 
-    run_mpv_command(state.clone(), {
+    let result = run_mpv_command(state.clone(), {
         let play_url = play_url.clone();
         move |client| client.load_enqueue(&play_url)
     })
-    .await?;
-    record_history(state, source_url, play_url, source).await?;
+    .await;
+    if result.is_err() {
+        rollback_playback_request(&state.playback_state, &play_url);
+    }
+    result?;
     Ok(Json(OkResponse { ok: true }))
 }
 
@@ -263,7 +302,10 @@ async fn status(
     State(state): State<AppState>,
 ) -> std::result::Result<Json<crate::mpv::MpvStatus>, AppError> {
     info!(request_type = "status", "HTTP request");
-    let status = run_mpv_command(state, |client| client.status()).await?;
+    let loop_status = run_mpv_command(state.clone(), |client| client.loop_status())
+        .await
+        .ok();
+    let status = observed_status(&state.playback_state, loop_status);
     Ok(Json(status))
 }
 
@@ -303,22 +345,6 @@ where
         error!(error = %error, "mpv IPC error");
         AppError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
     })
-}
-
-async fn record_history(
-    state: AppState,
-    source_url: String,
-    play_url: String,
-    source: Option<String>,
-) -> std::result::Result<(), AppError> {
-    let result = run_db_command(state, move |database| {
-        database.record_play(&source_url, &play_url, source.as_deref())
-    })
-    .await;
-    if let Err(error) = &result {
-        error!(error = %error.message, "database write error");
-    }
-    result
 }
 
 async fn run_db_command<T, F>(state: AppState, command: F) -> std::result::Result<T, AppError>
@@ -843,6 +869,7 @@ mod tests {
             token: Arc::from("0123456789abcdef0123456789abcdef"),
             socket_path: Arc::new(PathBuf::from("/tmp/ura.sock")),
             database: Arc::new(Database::open(db_path.clone()).expect("open test database")),
+            playback_state: shared_playback_state(),
         };
         (state, db_path)
     }

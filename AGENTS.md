@@ -34,6 +34,8 @@ Do not add Windows or macOS support unless explicitly requested.
 ## Important Invariants
 
 - `mpv` IPC remains local-only and must not be exposed over TCP.
+- `mpv` runtime state and metadata must come from structured JSON IPC events and
+  properties, not parsed human-readable logs.
 - User-supplied URLs are never passed through a shell.
 - Supported media URLs remain allowlisted.
 - Use XDG paths for config, data, and runtime files.

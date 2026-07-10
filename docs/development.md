@@ -74,9 +74,35 @@ automated tests where possible. Existing tests cover stale socket removal, live
 socket rejection, audio-only `mpv` startup arguments, API authentication, URL
 validation, and client request construction.
 
+Metadata tests use fake `mpv` IPC events such as:
+
+```json
+{"event":"file-loaded"}
+{"event":"property-change","id":1,"name":"media-title","data":"Example song"}
+{"event":"property-change","id":2,"name":"duration","data":222.5}
+{"event":"property-change","id":3,"name":"metadata","data":{"TITLE":"Example song","ARTIST":"Example artist"}}
+```
+
+The fake tests should cover persistent event consumption, command response
+request IDs, metadata normalization, queue association, stale-status clearing,
+and malformed or unknown events.
+
 When manually testing with a fake or wrapped `mpv`, keep the fake earlier in
 `PATH` only for that shell and make sure it accepts the arguments used by
 `ura serve`.
+
+## Local-Media Metadata Smoke Test
+
+For a deterministic real-`mpv` smoke test that does not need the internet, use a
+local generated audio file with simple tags, then play it through a temporary
+test path or direct `mpv` wrapper when working on IPC behavior. Verify that the
+observer receives `file-loaded`, `media-title`, `duration`, and `metadata`
+without parsing logs.
+
+YouTube metadata smoke tests are optional and manual because they depend on
+network access and upstream availability. When running one, verify playback
+starts without a second metadata command, then check that `ura status` and
+`ura history` show a real title and never print literal `null`.
 
 ## Firefox Temporary Extension Testing
 
