@@ -5,7 +5,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 use crate::mpv::MediaMetadata;
@@ -87,30 +87,73 @@ impl Database {
         Ok(())
     }
 
-    pub fn update_track_metadata(&self, source_url: &str, metadata: &MediaMetadata) -> Result<()> {
+    pub fn update_track_metadata(
+        &self,
+        source_url: &str,
+        metadata: &MediaMetadata,
+    ) -> Result<bool> {
         let conn = self.connect()?;
         let title = clean_optional(metadata.title.as_deref());
         let uploader = clean_optional(metadata.uploader.as_deref().or(metadata.artist.as_deref()));
+        let duration = metadata
+            .duration_seconds
+            .map(|duration| duration.round() as i64);
         let thumbnail_url = clean_optional(metadata.thumbnail_url.as_deref());
+
+        let current = conn
+            .query_row(
+                "SELECT title, uploader, duration, thumbnail_url
+                 FROM tracks
+                 WHERE source_url = ?1",
+                params![source_url],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<i64>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
+                },
+            )
+            .optional()
+            .with_context(|| "failed to read current track metadata")?;
+
+        let Some((current_title, current_uploader, current_duration, current_thumbnail_url)) =
+            current
+        else {
+            return Ok(false);
+        };
+
+        let next_title = title.or(current_title.clone());
+        let next_uploader = uploader.or(current_uploader.clone());
+        let next_duration = duration.or(current_duration);
+        let next_thumbnail_url = thumbnail_url.or(current_thumbnail_url.clone());
+
+        if next_title == current_title
+            && next_uploader == current_uploader
+            && next_duration == current_duration
+            && next_thumbnail_url == current_thumbnail_url
+        {
+            return Ok(false);
+        }
+
         conn.execute(
             "UPDATE tracks
-             SET title = COALESCE(NULLIF(?1, ''), title),
-                 uploader = COALESCE(NULLIF(?2, ''), uploader),
-                 duration = COALESCE(?3, duration),
-                 thumbnail_url = COALESCE(NULLIF(?4, ''), thumbnail_url)
+             SET title = ?1,
+                 uploader = ?2,
+                 duration = ?3,
+                 thumbnail_url = ?4
              WHERE source_url = ?5",
             params![
-                title,
-                uploader,
-                metadata
-                    .duration_seconds
-                    .map(|duration| duration.round() as i64),
-                thumbnail_url,
-                source_url,
+                next_title,
+                next_uploader,
+                next_duration,
+                next_thumbnail_url,
+                source_url
             ],
         )
         .with_context(|| "failed to update track metadata")?;
-        Ok(())
+        Ok(true)
     }
 
     pub fn history(&self) -> Result<Vec<HistoryEntry>> {
@@ -299,7 +342,7 @@ mod tests {
                 Some("cli"),
             )
             .expect("record play");
-        database
+        let changed = database
             .update_track_metadata(
                 "https://youtu.be/example",
                 &MediaMetadata {
@@ -311,6 +354,7 @@ mod tests {
                 },
             )
             .expect("update metadata");
+        assert!(changed);
 
         let history = database.history().expect("read history");
         assert_eq!(history[0].title.as_deref(), Some("Example song"));
@@ -336,7 +380,7 @@ mod tests {
                 Some("cli"),
             )
             .expect("record play");
-        database
+        let changed = database
             .update_track_metadata(
                 "https://youtu.be/example",
                 &MediaMetadata {
@@ -346,7 +390,8 @@ mod tests {
                 },
             )
             .expect("set metadata");
-        database
+        assert!(changed);
+        let changed = database
             .update_track_metadata(
                 "https://youtu.be/example",
                 &MediaMetadata {
@@ -356,10 +401,45 @@ mod tests {
                 },
             )
             .expect("empty metadata update");
+        assert!(!changed);
 
         let history = database.history().expect("read history");
         assert_eq!(history[0].title.as_deref(), Some("Useful title"));
         assert_eq!(history[0].duration, Some(42));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn identical_metadata_update_reports_no_change() {
+        let path = unique_db_path("metadata-identical");
+        let database = Database::open(path.clone()).expect("open database");
+
+        database
+            .record_play(
+                "https://youtu.be/example",
+                "https://youtu.be/example",
+                Some("cli"),
+            )
+            .expect("record play");
+        let metadata = MediaMetadata {
+            title: Some("Example song".to_string()),
+            uploader: Some("Example artist".to_string()),
+            duration_seconds: Some(222.5),
+            thumbnail_url: Some("https://i.ytimg.com/vi/example/hqdefault.jpg".to_string()),
+            ..MediaMetadata::default()
+        };
+
+        assert!(
+            database
+                .update_track_metadata("https://youtu.be/example", &metadata)
+                .expect("first update")
+        );
+        assert!(
+            !database
+                .update_track_metadata("https://youtu.be/example", &metadata)
+                .expect("second update")
+        );
 
         let _ = fs::remove_file(path);
     }

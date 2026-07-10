@@ -149,6 +149,10 @@ associates the loaded item with a pending play or queue request. Later
 receiver does not parse human-readable `mpv` logs and does not run a second
 blocking `yt-dlp` extraction for metadata.
 
+Pending playback association falls back to queue order when mpv reports a
+resolved media path that differs from the submitted URL. This assumes the mpv
+playlist is not reordered outside ura.
+
 Normalized metadata fields are:
 
 ```text

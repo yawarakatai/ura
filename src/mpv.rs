@@ -585,8 +585,9 @@ fn handle_observer_line(
     let event: MpvEventMessage = serde_json::from_value(value)?;
     match event.event.as_deref() {
         Some("property-change") => {
-            handle_property_change(event, state);
-            update_current_track_metadata(database, state)?;
+            if handle_property_change(event, state) {
+                update_current_track_metadata(database, state)?;
+            }
             Ok(())
         }
         Some("file-loaded") => {
@@ -648,49 +649,60 @@ fn update_current_track_metadata(database: &Database, state: &SharedPlaybackStat
             state.normalized_metadata.clone(),
         )
     };
-    if let Some(source_url) = source_url {
-        database.update_track_metadata(&source_url, &metadata)?;
+    if let Some(source_url) = source_url
+        && database.update_track_metadata(&source_url, &metadata)?
+    {
         debug!("metadata_updated");
     }
     Ok(())
 }
 
-fn handle_property_change(event: MpvEventMessage, state: &SharedPlaybackState) {
+fn handle_property_change(event: MpvEventMessage, state: &SharedPlaybackState) -> bool {
     let mut state = state.lock().expect("playback state lock poisoned");
-    match event.name.as_deref() {
+    let metadata_changed = match event.name.as_deref() {
         Some("media-title") | None if event.id == Some(OBSERVE_MEDIA_TITLE) => {
             state.media_title = clean_string_value(event.data);
+            true
         }
         Some("duration") | None if event.id == Some(OBSERVE_DURATION) => {
             state.duration_seconds = number_value(event.data);
+            true
         }
         Some("metadata") | None if event.id == Some(OBSERVE_METADATA) => {
             state.metadata = match event.data {
                 Some(Value::Object(map)) => metadata_from_value_map(map),
                 _ => HashMap::new(),
             };
+            true
         }
         Some("path") | None if event.id == Some(OBSERVE_PATH) => {
             state.path = clean_string_value(event.data);
+            true
         }
         Some("pause") | None if event.id == Some(OBSERVE_PAUSE) => {
             state.pause = bool_value(event.data);
+            false
         }
         Some("idle-active") | None if event.id == Some(OBSERVE_IDLE_ACTIVE) => {
             state.idle_active = bool_value(event.data);
+            false
         }
         Some("playlist-pos") | None if event.id == Some(OBSERVE_PLAYLIST_POS) => {
             state.playlist_pos = i64_value(event.data);
+            false
         }
         Some("playlist-count") | None if event.id == Some(OBSERVE_PLAYLIST_COUNT) => {
             state.playlist_count = i64_value(event.data);
+            false
         }
         Some("time-pos") | None if event.id == Some(OBSERVE_TIME_POS) => {
             state.position_seconds = number_value(event.data);
+            false
         }
-        Some(_) | None => {}
-    }
+        Some(_) | None => false,
+    };
     refresh_normalized_metadata(&mut state);
+    metadata_changed
 }
 
 fn handle_end_file(state: &SharedPlaybackState) {
@@ -760,7 +772,7 @@ pub fn normalize_metadata(
     );
     let uploader = first_clean(metadata, &["uploader", "channel", "author"]);
     let album = first_clean(metadata, &["album"]);
-    let thumbnail_url = first_clean(metadata, &["thumbnail", "thumbnail_url", "icy-br"]);
+    let thumbnail_url = first_clean(metadata, &["thumbnail", "thumbnail_url"]);
 
     MediaMetadata {
         source_url: source_url.and_then(clean_str),
@@ -1079,30 +1091,30 @@ mod tests {
     #[test]
     fn property_changes_enrich_current_metadata() {
         let state = shared_playback_state();
-        handle_property_change(
+        assert!(handle_property_change(
             event_fixture(
                 OBSERVE_MEDIA_TITLE,
                 "media-title",
                 Value::String("Example song".to_string()),
             ),
             &state,
-        );
-        handle_property_change(
+        ));
+        assert!(handle_property_change(
             event_fixture(
                 OBSERVE_DURATION,
                 "duration",
                 Value::Number(serde_json::Number::from_f64(222.5).expect("number")),
             ),
             &state,
-        );
-        handle_property_change(
+        ));
+        assert!(handle_property_change(
             event_fixture(
                 OBSERVE_METADATA,
                 "metadata",
                 json!({"TITLE":"Example song","ARTIST":"Example artist"}),
             ),
             &state,
-        );
+        ));
 
         let state = state.lock().expect("state lock");
         assert_eq!(
@@ -1114,6 +1126,116 @@ mod tests {
             Some("Example artist")
         );
         assert_eq!(state.normalized_metadata.duration_seconds, Some(222.5));
+    }
+
+    #[test]
+    fn runtime_property_changes_update_state_without_metadata_effect() {
+        let state = shared_playback_state();
+
+        assert!(!handle_property_change(
+            event_fixture(
+                OBSERVE_TIME_POS,
+                "time-pos",
+                Value::Number(serde_json::Number::from_f64(12.5).expect("number")),
+            ),
+            &state,
+        ));
+        assert!(!handle_property_change(
+            event_fixture(OBSERVE_PAUSE, "pause", Value::Bool(true)),
+            &state,
+        ));
+        assert!(!handle_property_change(
+            event_fixture(
+                OBSERVE_PLAYLIST_POS,
+                "playlist-pos",
+                Value::Number(serde_json::Number::from(1)),
+            ),
+            &state,
+        ));
+        assert!(!handle_property_change(
+            event_fixture(
+                OBSERVE_PLAYLIST_COUNT,
+                "playlist-count",
+                Value::Number(serde_json::Number::from(3)),
+            ),
+            &state,
+        ));
+
+        let state = state.lock().expect("state lock");
+        assert_eq!(state.position_seconds, Some(12.5));
+        assert_eq!(state.pause, Some(true));
+        assert_eq!(state.playlist_pos, Some(1));
+        assert_eq!(state.playlist_count, Some(3));
+    }
+
+    #[test]
+    fn metadata_relevant_properties_report_metadata_effect() {
+        let state = shared_playback_state();
+
+        assert!(handle_property_change(
+            event_fixture(
+                OBSERVE_MEDIA_TITLE,
+                "media-title",
+                Value::String("Example song".to_string()),
+            ),
+            &state,
+        ));
+        assert!(handle_property_change(
+            event_fixture(
+                OBSERVE_DURATION,
+                "duration",
+                Value::Number(serde_json::Number::from_f64(10.0).expect("number")),
+            ),
+            &state,
+        ));
+        assert!(handle_property_change(
+            event_fixture(
+                OBSERVE_METADATA,
+                "metadata",
+                json!({"TITLE":"Metadata title"})
+            ),
+            &state,
+        ));
+        assert!(handle_property_change(
+            event_fixture(
+                OBSERVE_PATH,
+                "path",
+                Value::String("https://youtu.be/example".to_string()),
+            ),
+            &state,
+        ));
+    }
+
+    #[test]
+    fn icy_bitrate_is_not_thumbnail_metadata() {
+        let metadata = HashMap::from([("icy-br".to_string(), "128".to_string())]);
+
+        let normalized = normalize_metadata(None, None, None, None, &metadata);
+
+        assert_eq!(normalized.thumbnail_url, None);
+    }
+
+    #[test]
+    fn thumbnail_metadata_keys_are_accepted() {
+        let metadata = HashMap::from([(
+            "thumbnail".to_string(),
+            "https://example.test/thumb.jpg".to_string(),
+        )]);
+        let normalized = normalize_metadata(None, None, None, None, &metadata);
+        assert_eq!(
+            normalized.thumbnail_url.as_deref(),
+            Some("https://example.test/thumb.jpg")
+        );
+
+        let metadata = HashMap::from([(
+            "thumbnail_url".to_string(),
+            "https://example.test/thumb-url.jpg".to_string(),
+        )]);
+        let normalized = normalize_metadata(None, None, None, None, &metadata);
+        assert_eq!(
+            normalized.thumbnail_url.as_deref(),
+            Some("https://example.test/thumb-url.jpg")
+        );
     }
 
     #[test]

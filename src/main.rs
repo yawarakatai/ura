@@ -255,11 +255,16 @@ fn shorten_source(source: &str) -> String {
 }
 
 fn truncate(value: &str, width: usize) -> String {
-    let mut truncated = value.chars().take(width).collect::<String>();
-    if value.chars().count() > width && width > 1 {
-        truncated.pop();
-        truncated.push_str("...");
+    let char_count = value.chars().count();
+    if char_count <= width {
+        return value.to_string();
     }
+    if width <= 3 {
+        return ".".repeat(width);
+    }
+    let prefix_width = width - 3;
+    let mut truncated = value.chars().take(prefix_width).collect::<String>();
+    truncated.push_str("...");
     truncated
 }
 
@@ -299,7 +304,16 @@ mod tests {
 
     #[test]
     fn truncate_uses_ascii_suffix() {
-        assert_eq!(truncate("abcdef", 4), "abc...");
+        assert_eq!(truncate("abcdef", 6), "abcdef");
+        assert_eq!(truncate("abcdef", 5), "ab...");
+        assert_eq!(truncate("abcdef", 3), "...");
+        assert_eq!(truncate("abcdef", 2), "..");
+    }
+
+    #[test]
+    fn truncate_counts_unicode_characters() {
+        assert_eq!(truncate("あいうえお", 4), "あ...");
+        assert_eq!(truncate("あいう", 3), "あいう");
     }
 }
 
