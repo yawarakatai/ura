@@ -21,14 +21,9 @@
         "aarch64-linux"
       ];
 
-      flake = {
-        homeManagerModules = {
-          default = import ./nix/home-manager-module.nix {
-            inherit self;
-          };
-
-          ura = self.homeManagerModules.default;
-        };
+      flake.homeManagerModules = rec {
+        default = import ./nix/home-manager-module.nix { inherit self; };
+        ura = default;
       };
 
       perSystem =
@@ -37,50 +32,50 @@
           inputs',
           ...
         }:
-
         let
+          fenixPkgs = inputs'.fenix.packages;
+
+          rustToolchain = fenixPkgs.stable.withComponents [
+            "cargo"
+            "clippy"
+            "rust-src"
+            "rustc"
+            "rustfmt"
+          ];
+
           rustPlatform = pkgs.makeRustPlatform {
-            cargo = inputs'.fenix.packages.stable.cargo;
-            rustc = inputs'.fenix.packages.stable.rustc;
+            cargo = fenixPkgs.stable.cargo;
+            rustc = fenixPkgs.stable.rustc;
           };
-        in
-        {
-          packages.default = rustPlatform.buildRustPackage {
+
+          uraPackage = rustPlatform.buildRustPackage {
             pname = "ura";
             version = "0.1.0";
 
             src = ./.;
 
-            cargoLock = {
-              lockFile = ./Cargo.lock;
-            };
+            cargoLock.lockFile = ./Cargo.lock;
 
             nativeBuildInputs = [
-              pkgs.makeWrapper
               pkgs.pkg-config
             ];
 
             buildInputs = [
               pkgs.sqlite
             ];
-
-            postInstall = ''
-              wrapProgram "$out/bin/ura" \
-                --prefix PATH : ${
-                  pkgs.lib.makeBinPath [
-                    pkgs.mpv
-                    pkgs.yt-dlp
-                  ]
-                }
-            '';
           };
-
-          packages.ura = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
+        in
+        {
+          packages = {
+            default = uraPackage;
+            ura = uraPackage;
+          };
 
           devShells.default = pkgs.mkShell {
             packages = [
-              inputs'.fenix.packages.stable.toolchain
-              inputs'.fenix.packages.stable.rust-analyzer
+              rustToolchain
+              fenixPkgs.stable.rust-analyzer
+
               pkgs.mpv
               pkgs.nodejs_22
               pkgs.sqlite

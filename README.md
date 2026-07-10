@@ -1,142 +1,152 @@
 # ura
 
-`ura` is a tiny audio caster for Linux and NixOS. Send a YouTube URL from the
-CLI or the browser extension to a receiver machine, and the receiver plays it as
-audio only through `mpv`.
+Send a YouTube URL to another Linux machine and play it as audio.
 
-`ura` is a personal receiver, not a Chromecast clone. It does not provide public
-internet exposure, account login, phone apps, Spotify playback, DRM playback, or
-cloud sync.
+`ura` runs a small receiver on the machine connected to your speakers. Control
+it from another device using the CLI or the Firefox extension.
 
-## Current Functionality
-
-- run a local HTTP receiver with bearer-token authentication
-- play or queue supported YouTube URLs
-- control pause/resume, stop, and loop mode
-- report basic `mpv` status
-- store playback history in SQLite
-- pair controllers with a six-digit receiver-screen code
-- send the current tab from a minimal Firefox extension
-
-Supported media URLs are currently allowlisted to:
-
-- `https://www.youtube.com/watch?...`
-- `https://music.youtube.com/watch?...`
-- `https://youtu.be/...`
-
-## Requirements
-
-- Linux
-- `mpv`
-- `yt-dlp`
-- SQLite
-
-The Nix development shell includes the needed runtime tools.
-
-## Quick Start
-
-```bash
-nix develop
-cargo run -- config init
-cargo run -- serve
+```text
+CLI / Firefox extension
+        ↓ HTTP
+    ura receiver
+        ↓
+  mpv + yt-dlp
+        ↓
+   audio output
 ```
 
-In another terminal:
+## Features
+
+- Play or queue YouTube URLs on another Linux device
+- Pair devices using a six-digit code shown on the receiver
+- Control playback from the CLI or Firefox
+- Switch between multiple receivers
+- Pause, resume, stop, and configure loop behavior
+- View current playback status and history
+- Run the receiver as a systemd user service
+
+Supported URLs currently include:
+
+- `youtube.com/watch`
+- `music.youtube.com/watch`
+- `youtu.be`
+
+## Quick start
+
+Start the receiver on the machine connected to your speakers:
 
 ```bash
-cargo run -- play "https://youtu.be/..."
-cargo run -- status
+ura serve --bind 0.0.0.0:8765
 ```
 
-Installed binary usage is the same without `cargo run --`:
+In another terminal on the receiver, open pairing:
 
 ```bash
-ura config init
-ura serve
+ura pair
+```
+
+The command displays an address and a six-digit code.
+
+On the controlling device:
+
+```bash
+ura pair 192.168.1.23
 ura play "https://youtu.be/..."
 ```
 
-## CLI
+The controlling device does not need to run a background service.
+
+## Firefox extension
+
+Load the extension from `extension/`, then open its options page.
+
+On the receiver:
 
 ```bash
-ura serve
-ura play "https://youtu.be/..."
-ura queue "https://youtu.be/..."
+ura pair
+```
+
+Enter the displayed address and code in the extension. Once paired, open a
+YouTube tab and click the toolbar button to send it to the selected receiver.
+
+The extension supports multiple receivers and `play` or `queue` as the default
+action.
+
+## Commands
+
+Playback:
+
+```bash
+ura play <url>
+ura queue <url>
 ura pause
 ura resume
 ura toggle
 ura stop
 ura status
 ura history
+```
+
+Looping:
+
+```bash
 ura loop
 ura loop off
 ura loop track
 ura loop queue
 ura loop status
-ura pair
-ura pair 192.168.1.23
-ura device list
-ura device add kamo 192.168.1.23 --token <token>
-ura device select kamo
-ura device remove kamo
-ura device authorize desuwa
-ura device revoke desuwa
-ura config init
-ura token generate
 ```
 
-`ura loop` toggles current-track looping. `ura loop track` loops the current
-track, `ura loop queue` loops the playback queue, and `ura loop off` disables
-both.
-
-Multiple receivers can be configured manually:
+Devices:
 
 ```bash
-ura device authorize desuwa
-ura device add kamo 192.168.1.23 --token <shown-token>
-ura device select kamo
+ura pair [address]
+ura device list
+ura device select <name>
+ura device remove <name>
+ura device revoke <name>
+```
+
+Use a specific receiver without changing the selected device:
+
+```bash
 ura play --to kamo "https://youtu.be/..."
 ```
 
-Or pair without copying tokens manually:
+Run `ura --help` or `ura <command> --help` for the complete CLI reference.
+
+## Requirements
+
+A receiver needs:
+
+- Linux
+- `mpv`
+- `yt-dlp`
+
+A CLI controller only needs the `ura` binary. A Firefox-only controller does
+not need the CLI installed.
+
+## Network and security
+
+`ura` uses plain HTTP with per-device bearer tokens. Pairing must be initiated
+from the receiver and is confirmed with a short-lived code shown on its screen.
+
+The protocol is intended for private networks. Do not expose the receiver
+directly to the public internet.
+
+The `mpv` IPC socket remains local to the receiver and is never exposed over
+TCP.
+
+## Development
+
+Enter the development environment and run the complete verification gate:
 
 ```bash
-# on the receiver
-ura pair
-
-# on the controlling device
-ura pair 192.168.1.23
+nix develop
+./scripts/verify.sh
 ```
 
-## Browser Extension
-
-Load `extension/` temporarily in Firefox, then pair it with a running receiver:
-
-```bash
-# on the receiver
-ura pair
-```
-
-Open the extension options, enter the receiver address and six-digit code, name
-the receiver, and click Pair. The returned token is saved but not displayed.
-Pair more receivers from the same options page, then select the destination and
-default action: `play` or `queue`.
-
-Click the toolbar button to send the current tab URL to the selected receiver.
-
-## Security And Network
-
-The receiver defaults to `127.0.0.1:8765`. Bind to a LAN or Tailscale address
-only when you intend to expose the receiver to that network:
-
-```bash
-ura serve --bind 192.168.1.20:8765
-```
-
-The HTTP API requires `Authorization: Bearer <token>`. The `mpv` IPC socket is a
-local Unix socket and is not exposed over TCP.
-
-## More Documentation
+## Documentation
 
 - [Architecture](docs/architecture.md)
 - [Pairing and authentication](docs/pairing-auth.md)
