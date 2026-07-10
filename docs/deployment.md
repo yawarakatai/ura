@@ -136,6 +136,10 @@ your tailnet:
 bind = "100.x.y.z:8765"
 ```
 
+For another device to pair or control playback, the receiver HTTP port must be
+reachable through the local firewall on the chosen LAN or private overlay
+interface.
+
 ## Device Authorization
 
 Receiver-side authorized devices live in the SQLite database under
@@ -153,6 +157,33 @@ receiver_url = "http://192.168.1.20:8765"
 
 The legacy token is still accepted after authorized-device lookup fails. Keep it
 only while older CLI or browser-extension settings still need it.
+
+## Pairing
+
+`ura serve` must already be running before local receiver-side pairing:
+
+```bash
+ura pair
+```
+
+The command talks to the running receiver through:
+
+```text
+$XDG_RUNTIME_DIR/ura/control.sock
+```
+
+The socket is local-only, created under `$XDG_RUNTIME_DIR/ura` with restrictive
+directory permissions, and removed when the receiver shuts down. Pairing does
+not require restarting `ura serve`.
+
+On the controller, use the address printed by the receiver:
+
+```bash
+ura pair 192.168.1.20
+```
+
+The default port `8765` can be omitted. If the receiver uses a custom port, keep
+it in the address.
 
 ## Troubleshooting With journalctl
 
@@ -184,9 +215,9 @@ existing receiver before starting another one.
    address.
 2. Set `bind` in `~/.config/ura/config.toml`.
 3. Start or restart `ura serve`.
-4. Run `ura device authorize <name>` on the receiver and store the shown token.
-5. From the controller device, run `ura device add <name> <address> --token <token>`.
-6. Run `ura device select <name>`.
+4. Run `ura pair` on the receiver and note the shown code.
+5. From the controller device, run `ura pair <address>`.
+6. Confirm the new receiver is selected, or run `ura device select <name>`.
 7. Run `ura status` or use the browser extension with its existing URL/token settings.
 8. Send a short supported YouTube URL and verify that audio plays on the
    receiver machine.

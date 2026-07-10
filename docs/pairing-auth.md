@@ -1,184 +1,164 @@
 # Pairing And Authentication
 
-Status: Planned; not yet implemented.
+Status: Implemented for CLI receiver-screen pairing.
 
-This document describes the decided next-generation pairing and authentication
-design. The current implementation still uses a single shared bearer token from
-`config.toml`; see [architecture.md](architecture.md) for current behavior.
+`ura` supports per-device bearer tokens, multiple configured receivers, and
+receiver-screen pairing through `ura pair`.
 
 ## Threat Model
 
 `ura` is for personal use on a trusted local network or private overlay network.
-The pairing design protects against casual unauthorized control by another
-device on the same network and avoids copying one shared long-lived secret to
-every controller.
+Pairing protects against casual unauthorized control by requiring visibility of
+the receiver terminal where the six-digit code is shown.
 
-Expected impact is limited to controlling local audio playback and reading local
-playback history exposed by the receiver API. The design is not intended for
-hostile networks, public internet exposure, or high-value multi-user access
-control.
+Pairing is not a defense for hostile networks or public internet exposure.
+Plain HTTP remains visible to anyone who can observe the network path. Use a
+trusted tunnel or reverse proxy if transport encryption is required.
 
 ## Trust Model
 
-The receiver screen is the trusted out-of-band channel. Pairing requires
-physical visibility of the receiver terminal or display where `ura pair` shows a
-short code.
+The receiver screen is the trusted out-of-band channel. The six-digit code is
+valid for 120 seconds and allows creation of one new random bearer token. The
+long-lived bearer token is not derived from the code.
 
-There is no IP-based authentication. Network location can help reach the
-receiver, but it does not prove identity.
+There is no IP-based authorization. A controller remains authorized by its
+bearer token even if its address changes.
 
-## Receiver Workflow: `ura pair`
+## CLI Pairing
 
-Planned receiver flow:
+On the receiver:
 
-1. The user runs `ura pair` on the receiver.
-2. The receiver prints a six-digit pairing code.
-3. The code is valid for 120 seconds.
-4. The receiver accepts at most five failed attempts.
-5. Pairing closes after success, timeout, or attempt exhaustion.
-6. On success, the receiver creates a bearer token for that peer.
-7. The receiver stores only a hash of the token.
-
-The raw bearer token is shown or returned only during pairing and cannot be
-recovered from receiver storage later.
-
-## Controller Workflow: `ura pair <ADDRESS>`
-
-Planned controller CLI flow:
-
-1. The user runs `ura pair <receiver-address>`.
-2. The controller normalizes the address.
-3. The controller prompts for the six-digit code shown by the receiver.
-4. On success, the controller stores the receiver URL and issued bearer token.
-
-Controllers may store multiple receivers. Each receiver entry has its own URL
-and bearer token.
-
-## Planned Device Commands
-
-These commands are planned and are not implemented in the current CLI:
-
-```text
+```bash
 ura pair
-ura pair <ADDRESS>
-ura device list
-ura device select <NAME>
-ura device remove <NAME>
-ura play --to <NAME> <URL>
-ura queue --to <NAME> <URL>
 ```
 
-`ura pair` opens pairing on the local receiver. `ura pair <ADDRESS>` pairs this
-controller or extension with the specified receiver.
+This contacts the already-running local `ura serve` process through
+`$XDG_RUNTIME_DIR/ura/control.sock`, starts one temporary pairing session, and
+prints the receiver address, six-digit code, and expiry. It waits until pairing
+succeeds, expires, is cancelled, or reaches five invalid attempts.
 
-`ura device list` lists known remote receivers and devices authorized to control
-the local receiver. `ura device select <NAME>` persistently selects the device
-used when `--to` is omitted. `ura device remove <NAME>` removes a known remote
-device or revokes a locally authorized device. `--to <NAME>` overrides the
-selected destination for one command.
+On the controller:
 
-## Browser Extension Workflow
+```bash
+ura pair 192.168.1.23
+```
 
-The browser extension must be able to pair without the CLI. Planned extension
-flow:
+The controller normalizes the receiver address, checks `/v1/pair/info`, prompts
+for the code, prompts for this controller's device name when needed, prompts for
+the local receiver alias, submits the claim, stores the returned token in
+`config.toml`, and optionally selects the receiver.
 
-1. The user enters or discovers the receiver address in extension options.
-2. The extension normalizes the address.
-3. The extension prompts for the six-digit code shown by `ura pair`.
-4. On success, the extension stores the receiver URL and issued bearer token.
+Non-interactive use:
 
-The extension should not require users to copy tokens manually once pairing is
-implemented.
+```bash
+ura pair 192.168.1.23 \
+  --code 482913 \
+  --device-name desuwa \
+  --name kamo \
+  --select
+```
 
-## Address Normalization
+## Pairing API
 
-Planned address handling:
-
-- accept hostnames, IPv4 addresses, and private overlay addresses
-- add `http://` when no scheme is provided
-- reject schemes other than `http://`
-- add the default port `8765` when no port is provided
-- preserve an explicit path prefix when present
-- trim surrounding whitespace
-
-Examples:
+Pairing adds two unauthenticated endpoints that work only while a pairing
+session is active:
 
 ```text
-receiver.local        -> http://receiver.local:8765
-192.168.1.20          -> http://192.168.1.20:8765
-100.x.y.z:9000        -> http://100.x.y.z:9000
-http://host:8765/ura  -> http://host:8765/ura
+GET  /v1/pair/info
+POST /v1/pair/claim
 ```
+
+`GET /v1/pair/info` returns minimal state:
+
+```json
+{
+  "pairing": true,
+  "receiver_name": "kamo",
+  "expires_in": 93
+}
+```
+
+Inactive or expired pairing returns `403` with:
+
+```json
+{
+  "error": "pairing_not_active"
+}
+```
+
+`POST /v1/pair/claim` accepts:
+
+```json
+{
+  "code": "482913",
+  "device_name": "desuwa"
+}
+```
+
+On success it returns the plaintext bearer token exactly once:
+
+```json
+{
+  "protocol_version": 1,
+  "receiver_name": "kamo",
+  "token": "<new-random-bearer-token>"
+}
+```
+
+The API does not return the pairing code, token hash, database IDs, authorized
+device list, or receiver database details.
+
+## Lifecycle
+
+Pairing behavior:
+
+- exactly one active pairing session per receiver
+- six decimal digits, including leading zeroes
+- 120-second lifetime
+- five invalid six-digit attempts
+- malformed codes do not consume attempts
+- successful claim consumes and closes the session
+- timeout, attempt exhaustion, cancellation, and receiver shutdown close it
+- starting a new session invalidates the previous one
+
+The receiver first verifies the code, then registers the supplied device name.
+Duplicate active authorized-device names return `409`.
 
 ## Token Model
 
-Pairing issues per-device bearer tokens. A receiver can have multiple paired
-devices, and each device has an independent token. A controller can store
-multiple receiver devices. Internal implementation details may still use `peer`
-where technically appropriate.
-
-The receiver stores token hashes, not raw bearer tokens. Requests still use:
+Normal API requests use:
 
 ```text
 Authorization: Bearer <token>
 ```
 
-## Current Manual Bridge
+Receiver-side authorized devices live in SQLite and store SHA-256 token hashes,
+not plaintext tokens. Pairing and `ura device authorize <name>` use the same
+internal authorization path to create a random token with at least 256 bits of
+entropy and store only its hash.
 
-Pairing-code setup is planned. The current bridge is manual per-device
-authorization:
+Controller-side remote receivers are stored in config as `[[devices]]` entries.
+`ura pair <ADDRESS>` reuses the same config update behavior as
+`ura device add <name> <address> --token <token>` and can also set
+`selected_device`.
 
-```bash
-ura device authorize desuwa
-ura device add kamo 192.168.1.23 --token <shown-token>
-ura device select kamo
-ura play --to kamo "https://youtu.be/..."
-ura device remove kamo
-ura device revoke desuwa
+Legacy flat `receiver_url` and `token` config remains readable when no
+`[[devices]]` entries exist.
+
+## Browser Extension
+
+The browser extension pairing UI is still planned. The protocol is intentionally
+plain JSON over:
+
+```text
+GET /v1/pair/info
+POST /v1/pair/claim
 ```
 
-`ura pair` will automate creation and transfer of the same per-device bearer
-credential that `device authorize` creates today.
-
-## Legacy Configuration Compatibility
-
-Legacy configuration uses one shared token in `config.toml`:
-
-```toml
-token = "..."
-receiver_url = "http://127.0.0.1:8765"
-bind = "127.0.0.1:8765"
-```
-
-Transition behavior:
-
-- keep existing single-token configuration working during transition
-- allow manual authorization and future pairing to create per-device credentials alongside the existing token
-- provide a clear path to revoke or remove the legacy shared token later
-- avoid breaking existing local-only users without an explicit migration step
-
-## Rationale For Plain HTTP And Bearer Auth
-
-The receiver is intended for local networks and private overlays, not the public
-internet. Plain HTTP keeps setup simple for browsers, CLIs, and LAN-only
-devices. Bearer tokens are easy for the current CLI and extension to use and are
-compatible with the existing API.
-
-Pairing improves token distribution, not transport security. Users who need
-transport encryption should place `ura` behind a local trusted tunnel or reverse
-proxy that they operate.
+so the extension can later pair without CLI-specific assumptions.
 
 ## Explicit Non-Goals
 
-The planned pairing design does not include:
-
-- HTTPS managed by `ura`
-- mTLS
-- HMAC request signing
-- PAKE
-- OAuth
-- JWT
-- Matter
-- Chromecast compatibility
-- mandatory mDNS
-- public internet exposure
+Pairing does not implement HTTPS, mDNS discovery, browser-extension pairing UI,
+IP allowlists, PAKE, HMAC request signing, QR codes, public-internet exposure,
+Chromecast compatibility, Spotify direct playback, or DRM bypass.

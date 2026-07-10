@@ -35,6 +35,8 @@ ura loop off
 ura loop track
 ura loop queue
 ura loop status
+ura pair
+ura pair 192.168.1.23
 ura config init
 ura token generate
 ```
@@ -44,6 +46,13 @@ Controller commands resolve a destination from `--to <name>` or the configured
 bearer token. Legacy `receiver_url` and `token` config is still read when no
 `[[devices]]` entries exist. `URA_RECEIVER_URL`, `URA_TOKEN`,
 `--receiver-url`, and `--token` remain compatibility overrides.
+
+`ura pair` without an address is a receiver-side command. It connects to the
+local control socket for the already-running `ura serve` process and starts a
+temporary pairing session. `ura pair <ADDRESS>` is a controller-side command
+that normalizes the receiver address, claims the pairing session, stores the
+issued token through the same config path as `ura device add`, and can update
+`selected_device`.
 
 ## Browser Extension
 
@@ -88,12 +97,18 @@ not update `last_seen_at`.
 Current endpoints:
 
 ```text
+GET  /v1/pair/info
+POST /v1/pair/claim
 POST /v1/play
 POST /v1/enqueue
 POST /v1/control
 GET  /v1/status
 GET  /v1/history
 ```
+
+`GET /v1/pair/info` and `POST /v1/pair/claim` are unauthenticated only while a
+pairing session is active. They do not weaken authentication for the normal
+playback, control, status, or history endpoints, which remain bearer-protected.
 
 `POST /v1/play` replaces current playback. `POST /v1/enqueue` appends to the
 mpv playlist and starts playback when appropriate. Both accept JSON with a
@@ -199,6 +214,36 @@ history. Metadata enrichment updates the existing `tracks` row for the canonical
 source URL without rewriting the historical play time. Replaying the same URL
 increments play count and can refresh missing metadata.
 
+## Pairing Manager And Control Socket
+
+`ura serve` owns a `PairingManager` shared by the local control socket and the
+pairing HTTP endpoints. The manager tracks the current code, expiry, remaining
+attempts, claim-in-progress state, and final completion state under one
+synchronized owner.
+
+The local administrative socket is:
+
+```text
+$XDG_RUNTIME_DIR/ura/control.sock
+```
+
+It is a Unix socket created under a restrictive runtime directory and removed on
+receiver shutdown. It accepts local JSON commands:
+
+```json
+{"command":"pair_start"}
+{"command":"pair_status"}
+{"command":"pair_cancel"}
+```
+
+The pairing code is only returned over this local socket and printed by
+`ura pair` on the receiver. There is no network endpoint that can start
+pairing.
+
+Successful HTTP pairing uses the same authorized-device database operation as
+`ura device authorize <name>`. The controller stores the returned token through
+the same remote-device config operation used by manual device addition.
+
 ## XDG Paths
 
 Current default paths:
@@ -214,9 +259,10 @@ database:
 
 runtime socket:
   $XDG_RUNTIME_DIR/ura/mpv.sock
+  $XDG_RUNTIME_DIR/ura/control.sock
 ```
 
-`XDG_RUNTIME_DIR` is required for the `mpv` IPC socket.
+`XDG_RUNTIME_DIR` is required for the local runtime sockets.
 
 ## Configuration
 

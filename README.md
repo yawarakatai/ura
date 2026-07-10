@@ -15,6 +15,7 @@ cloud sync.
 - control pause/resume, stop, and loop mode
 - report basic `mpv` status
 - store playback history in SQLite
+- pair controllers with a six-digit receiver-screen code
 - send the current tab from a minimal Firefox extension
 
 Supported media URLs are currently allowlisted to:
@@ -72,6 +73,8 @@ ura loop off
 ura loop track
 ura loop queue
 ura loop status
+ura pair
+ura pair 192.168.1.23
 ura device list
 ura device add kamo 192.168.1.23 --token <token>
 ura device select kamo
@@ -95,7 +98,15 @@ ura device select kamo
 ura play --to kamo "https://youtu.be/..."
 ```
 
-Pairing-code setup is planned but not implemented.
+Or pair without copying tokens manually:
+
+```bash
+# on the receiver
+ura pair
+
+# on the controlling device
+ura pair 192.168.1.23
+```
 
 ## Browser Extension
 
@@ -122,6 +133,6 @@ local Unix socket and is not exposed over TCP.
 ## More Documentation
 
 - [Architecture](docs/architecture.md)
-- [Planned pairing/authentication design](docs/pairing-auth.md)
+- [Pairing and authentication](docs/pairing-auth.md)
 - [Development and validation](docs/development.md)
 - [Deployment and operation](docs/deployment.md)

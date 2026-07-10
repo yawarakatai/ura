@@ -115,6 +115,36 @@ configured token still works, and no token or token hash appears in normal
 output or logs. Successful authorized-device authentication updates
 `last_seen_at` no more than once per 60 seconds.
 
+## Pairing Verification
+
+Use separate isolated XDG paths for receiver and controller, even when both run
+under the same Unix user:
+
+```bash
+export XDG_CONFIG_HOME=/tmp/ura-pair-receiver/config
+export XDG_DATA_HOME=/tmp/ura-pair-receiver/data
+export XDG_RUNTIME_DIR=/tmp/ura-pair-receiver/runtime
+mkdir -p "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_RUNTIME_DIR"
+chmod 700 "$XDG_RUNTIME_DIR"
+```
+
+Use a different `/tmp/ura-pair-controller/...` set for the controller shell.
+
+Pairing tests should cover:
+
+- fake receiver/client pairing through `GET /v1/pair/info` and
+  `POST /v1/pair/claim`
+- isolated controller config updates after a successful claim
+- token secrecy checks: no code, plaintext token, token hash, or
+  `Authorization` header in logs
+- cancellation, expiry, wrong-code attempt exhaustion, and malformed-code cases
+- normal bearer-protected endpoints remaining protected while pairing is active
+
+For an end-to-end smoke test, start `ura serve` in the receiver environment, run
+`ura pair` in another receiver-environment shell, then run
+`ura pair <address>` from the controller environment and verify `ura status`
+authenticates with the newly stored credential.
+
 ## Firefox Temporary Extension Testing
 
 1. Open Firefox.
