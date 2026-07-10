@@ -3,7 +3,7 @@ use std::{net::SocketAddr, path::PathBuf};
 use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
-#[command(name = "ura", version, about = "Tiny LAN/Tailscale audio caster")]
+#[command(name = "ura", version, about = "A tiny remote audio receiver for Linux.")]
 pub struct Cli {
     #[arg(long, global = true)]
     pub config: Option<PathBuf>,
