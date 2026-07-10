@@ -28,3 +28,22 @@ button {
   min-height: 1.2em;
   margin: 0;
 }
+
+h2 {
+  font: inherit;
+  font-weight: bold;
+  margin: 1.5rem 0 0.5rem;
+}
+
+.device-row {
+  align-items: center;
+  display: grid;
+  gap: 0.5rem;
+  grid-template-columns: 8rem 1fr auto;
+  padding: 0.25rem 0;
+}
+
+.device-actions {
+  display: flex;
+  gap: 0.375rem;
+}

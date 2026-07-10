@@ -1,6 +1,6 @@
 # Pairing And Authentication
 
-Status: Implemented for CLI receiver-screen pairing.
+Status: Implemented for CLI and Firefox extension receiver-screen pairing.
 
 `ura` supports per-device bearer tokens, multiple configured receivers, and
 receiver-screen pairing through `ura pair`.
@@ -147,18 +147,35 @@ Legacy flat `receiver_url` and `token` config remains readable when no
 
 ## Browser Extension
 
-The browser extension pairing UI is still planned. The protocol is intentionally
-plain JSON over:
+The Firefox extension uses the same pairing endpoints as the CLI. The options
+page normalizes the receiver address, checks `GET /v1/pair/info`, submits the
+six-digit code and local browser device name to `POST /v1/pair/claim`, stores
+the returned bearer token in `browser.storage.local`, and selects the newly
+paired receiver. Tokens are not displayed after pairing.
 
-```text
-GET /v1/pair/info
-POST /v1/pair/claim
+The extension stores multiple receivers locally as:
+
+```json
+{
+  "selectedDevice": "kamo",
+  "devices": [
+    {
+      "name": "kamo",
+      "url": "http://192.168.1.23:8765",
+      "token": "..."
+    }
+  ],
+  "defaultAction": "play",
+  "localDeviceName": "Firefox"
+}
 ```
 
-so the extension can later pair without CLI-specific assumptions.
+Legacy flat `receiverUrl` and `token` extension settings are migrated on load
+when no device list exists. The legacy fields are left in storage after a
+successful migration.
 
 ## Explicit Non-Goals
 
-Pairing does not implement HTTPS, mDNS discovery, browser-extension pairing UI,
-IP allowlists, PAKE, HMAC request signing, QR codes, public-internet exposure,
-Chromecast compatibility, Spotify direct playback, or DRM bypass.
+Pairing does not implement HTTPS, mDNS discovery, IP allowlists, PAKE, HMAC
+request signing, QR codes, public-internet exposure, Chromecast compatibility,
+Spotify direct playback, or DRM bypass.

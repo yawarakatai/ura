@@ -110,13 +110,19 @@ ura pair 192.168.1.23
 
 ## Browser Extension
 
-Load `extension/` temporarily in Firefox, open the extension options, and set:
+Load `extension/` temporarily in Firefox, then pair it with a running receiver:
 
-- receiver URL
-- token
-- default action: `play` or `queue`
+```bash
+# on the receiver
+ura pair
+```
 
-Click the toolbar button to send the current tab URL to the configured receiver.
+Open the extension options, enter the receiver address and six-digit code, name
+the receiver, and click Pair. The returned token is saved but not displayed.
+Pair more receivers from the same options page, then select the destination and
+default action: `play` or `queue`.
+
+Click the toolbar button to send the current tab URL to the selected receiver.
 
 ## Security And Network
 

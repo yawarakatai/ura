@@ -151,13 +151,24 @@ authenticates with the newly stored credential.
 2. Go to `about:debugging#/runtime/this-firefox`.
 3. Click "Load Temporary Add-on".
 4. Select `extension/manifest.json`.
-5. Open the extension options.
-6. Set receiver URL, token, and default action.
-7. Start `ura serve`.
-8. Open a supported YouTube URL and click the toolbar button.
+5. Start `ura serve`.
+6. Run `ura pair` on the receiver and keep the six-digit code visible.
+7. Open the extension options.
+8. Enter the receiver address, pairing code, receiver name, and browser device
+   name, then click Pair.
+9. Confirm the receiver is saved and selected.
+10. Pair a second receiver, switch between receivers, and remove one receiver.
+11. Open a supported YouTube URL and click the toolbar button.
+12. Confirm the selected receiver plays it.
+13. Confirm no token appears in the UI, browser console, or notifications.
+14. To verify legacy migration, pre-populate `browser.storage.local` with
+    `receiverUrl` and `token`, reload the options page, and confirm a `default`
+    receiver is created while the legacy fields remain present.
 
-The extension uses local storage for settings and sends the current tab URL to
-`/v1/play` or `/v1/enqueue`.
+The extension uses local storage for receiver devices and sends the current tab
+URL to `/v1/play` or `/v1/enqueue` on the selected receiver. If no receiver is
+selected, the toolbar action shows a notification that tells the user to pair or
+select one.
 
 ## Logging
 

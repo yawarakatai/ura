@@ -7,15 +7,25 @@
   </head>
   <body>
     <main>
-      <form id="settings-form">
+      <form id="pairing-form">
         <label>
-          Receiver URL
-          <input id="receiver-url" name="receiverUrl" type="url" required>
+          Receiver address
+          <input id="receiver-address" name="receiverAddress" type="text" required>
         </label>
 
         <label>
-          Token
-          <input id="token" name="token" type="password" required>
+          Pairing code
+          <input id="pairing-code" name="pairingCode" type="text" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" required>
+        </label>
+
+        <label>
+          Receiver name
+          <input id="receiver-name" name="receiverName" type="text" required>
+        </label>
+
+        <label>
+          This device name
+          <input id="local-device-name" name="localDeviceName" type="text" required>
         </label>
 
         <label>
@@ -26,10 +36,17 @@
           </select>
         </label>
 
-        <button type="submit">Save</button>
+        <button type="submit">Pair</button>
         <p id="status" role="status"></p>
       </form>
+
+      <section id="devices-section">
+        <h2>Devices</h2>
+        <p id="selected-device"></p>
+        <div id="devices"></div>
+      </section>
     </main>
+    <script src="lib.js"></script>
     <script src="options.js"></script>
   </body>
 </html>
