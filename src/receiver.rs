@@ -1,8 +1,8 @@
 use std::{
     fs,
     io::ErrorKind,
-    net::SocketAddr,
-    os::unix::{fs::FileTypeExt, net::UnixStream},
+    net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket},
+    os::unix::{fs::FileTypeExt, fs::PermissionsExt, net::UnixStream},
     path::{Path, PathBuf},
     process::{Command as StdCommand, ExitStatus, Stdio},
     sync::Arc,
@@ -11,7 +11,7 @@ use std::{
 use anyhow::{Context, Result as AnyhowResult};
 use axum::{
     Json, Router,
-    extract::{Request, State},
+    extract::{Request, State, rejection::JsonRejection},
     http::{HeaderMap, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -19,19 +19,24 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use tokio::{
-    net::TcpListener,
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, UnixListener},
     process::{Child, Command as TokioCommand},
     sync::oneshot,
     task::JoinHandle,
 };
 use tracing::{error, info, warn};
 
-use crate::config::{default_db_path, default_mpv_socket_path};
-use crate::db::{Database, HistoryEntry};
+use crate::config::{
+    default_control_socket_path, default_db_path, default_device_name, default_mpv_socket_path,
+    default_port,
+};
+use crate::db::{Database, HistoryEntry, authorize_device};
 use crate::mpv::{
     LoopMode, LoopStatus, MpvClient, MpvEventObserver, QueueMode, SharedPlaybackState,
     observed_status, register_playback_request, rollback_playback_request, shared_playback_state,
 };
+use crate::pairing::{ClaimDecision, PairingCompletion, PairingManager, PairingStatus};
 
 pub async fn run_serve(bind: SocketAddr, token: Option<String>) -> AnyhowResult<()> {
     info!("receiver startup");
@@ -42,10 +47,12 @@ pub async fn run_serve(bind: SocketAddr, token: Option<String>) -> AnyhowResult<
     ensure_program_in_path("yt-dlp")?;
 
     let socket_path = default_mpv_socket_path()?;
+    let control_socket_path = default_control_socket_path()?;
     info!(socket_path = %socket_path.display(), "mpv IPC socket path");
     create_runtime_dir(&socket_path)?;
     let database = Arc::new(Database::open(default_db_path()?)?);
     let playback_state = shared_playback_state();
+    let pairing = Arc::new(PairingManager::new(default_device_name()));
 
     let receiver = Receiver::start(socket_path)?;
     let (socket_path, mut mpv_shutdown, mut mpv_task) = receiver.into_parts();
@@ -56,6 +63,15 @@ pub async fn run_serve(bind: SocketAddr, token: Option<String>) -> AnyhowResult<
     );
     info!(bind = %bind, "HTTP receiver bind address");
 
+    let (control_shutdown, control_shutdown_rx) = oneshot::channel();
+    let mut control_shutdown = Some(control_shutdown);
+    let mut control_task = tokio::spawn(run_control_socket(
+        control_socket_path.clone(),
+        bind,
+        Arc::clone(&pairing),
+        control_shutdown_rx,
+    ));
+
     let (api_shutdown, api_shutdown_rx) = oneshot::channel();
     let mut api_shutdown = Some(api_shutdown);
     let mut api_task = tokio::spawn(run_api(
@@ -64,6 +80,7 @@ pub async fn run_serve(bind: SocketAddr, token: Option<String>) -> AnyhowResult<
         socket_path,
         database,
         playback_state,
+        pairing,
         api_shutdown_rx,
     ));
 
@@ -72,14 +89,32 @@ pub async fn run_serve(bind: SocketAddr, token: Option<String>) -> AnyhowResult<
             let status = task_result(result, "mpv supervision")?;
             info!(status = %status, "mpv child termination");
             signal_shutdown(&mut api_shutdown);
+            signal_shutdown(&mut control_shutdown);
             await_task(api_task, "HTTP receiver").await?;
+            await_task(control_task, "control socket").await?;
             info!("receiver shutdown");
             exit_status_result(status)
         }
         result = &mut api_task => {
             let api_result = task_result(result, "HTTP receiver");
+            signal_shutdown(&mut control_shutdown);
             signal_shutdown(&mut mpv_shutdown);
+            let control_result = await_task(control_task, "control socket").await;
             let mpv_result = await_task(mpv_task, "mpv supervision").await;
+            api_result?;
+            control_result?;
+            let status = mpv_result?;
+            info!(status = %status, "mpv child termination");
+            info!("receiver shutdown");
+            Ok(())
+        }
+        result = &mut control_task => {
+            let control_result = task_result(result, "control socket");
+            signal_shutdown(&mut api_shutdown);
+            signal_shutdown(&mut mpv_shutdown);
+            let api_result = await_task(api_task, "HTTP receiver").await;
+            let mpv_result = await_task(mpv_task, "mpv supervision").await;
+            control_result?;
             api_result?;
             let status = mpv_result?;
             info!(status = %status, "mpv child termination");
@@ -90,12 +125,15 @@ pub async fn run_serve(bind: SocketAddr, token: Option<String>) -> AnyhowResult<
             info!("shutdown signal received");
             let ctrl_c_result = result.with_context(|| "failed to listen for Ctrl+C");
             signal_shutdown(&mut api_shutdown);
+            signal_shutdown(&mut control_shutdown);
             signal_shutdown(&mut mpv_shutdown);
             let mpv_result = await_task(mpv_task, "mpv supervision").await;
             let api_result = await_task(api_task, "HTTP receiver").await;
+            let control_result = await_task(control_task, "control socket").await;
             ctrl_c_result?;
             let status = mpv_result?;
             api_result?;
+            control_result?;
             info!(status = %status, "mpv child termination");
             info!("receiver shutdown");
             Ok(())
@@ -109,6 +147,7 @@ async fn run_api(
     socket_path: PathBuf,
     database: Arc<Database>,
     playback_state: SharedPlaybackState,
+    pairing: Arc<PairingManager>,
     shutdown: oneshot::Receiver<()>,
 ) -> AnyhowResult<()> {
     let state = AppState {
@@ -116,6 +155,7 @@ async fn run_api(
         socket_path: Arc::new(socket_path),
         database,
         playback_state,
+        pairing,
     };
     let app = app(state);
     let listener = TcpListener::bind(bind)
@@ -131,6 +171,146 @@ async fn run_api(
         .with_context(|| "HTTP receiver failed")
 }
 
+async fn run_control_socket(
+    socket_path: PathBuf,
+    bind: SocketAddr,
+    pairing: Arc<PairingManager>,
+    mut shutdown: oneshot::Receiver<()>,
+) -> AnyhowResult<()> {
+    prepare_control_socket_path(&socket_path)?;
+    let listener = UnixListener::bind(&socket_path)
+        .with_context(|| format!("failed to bind control socket {}", socket_path.display()))?;
+    info!(socket_path = %socket_path.display(), "control socket listening");
+
+    loop {
+        tokio::select! {
+            accepted = listener.accept() => {
+                let (stream, _) = accepted.with_context(|| "failed to accept control socket client")?;
+                let pairing = Arc::clone(&pairing);
+                tokio::spawn(async move {
+                    if let Err(error) = handle_control_connection(stream, bind, pairing).await {
+                        warn!(error = %error, "control socket request failed");
+                    }
+                });
+            }
+            _ = &mut shutdown => {
+                pairing.cancel().await;
+                break;
+            }
+        }
+    }
+
+    match fs::remove_file(&socket_path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("failed to remove control socket {}", socket_path.display())
+            });
+        }
+    }
+    Ok(())
+}
+
+async fn handle_control_connection(
+    mut stream: tokio::net::UnixStream,
+    bind: SocketAddr,
+    pairing: Arc<PairingManager>,
+) -> AnyhowResult<()> {
+    let mut request = String::new();
+    stream
+        .read_to_string(&mut request)
+        .await
+        .with_context(|| "failed to read control socket request")?;
+    let request: ControlSocketRequest =
+        serde_json::from_str(&request).with_context(|| "invalid control socket request")?;
+
+    let response = match request.command.as_str() {
+        "pair_start" => {
+            let started = pairing.start().await?;
+            info!(expires_in = started.expires_in, "pairing_started");
+            ControlSocketResponse::PairStart {
+                code: started.code,
+                expires_in: started.expires_in,
+                address: display_address_for_bind(bind),
+            }
+        }
+        "pair_cancel" => {
+            pairing.cancel().await;
+            info!("pairing_cancelled");
+            ControlSocketResponse::Ok { ok: true }
+        }
+        "pair_status" => ControlSocketResponse::PairStatus {
+            status: pairing.status().await,
+            completion: pairing.completion().await,
+        },
+        other => ControlSocketResponse::Error {
+            error: format!("unsupported control command `{other}`"),
+        },
+    };
+
+    let body = serde_json::to_vec(&response)?;
+    stream
+        .write_all(&body)
+        .await
+        .with_context(|| "failed to write control socket response")?;
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+struct ControlSocketRequest {
+    command: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ControlSocketResponse {
+    PairStart {
+        code: String,
+        expires_in: u64,
+        address: String,
+    },
+    PairStatus {
+        status: PairingStatus,
+        completion: PairingCompletion,
+    },
+    Ok {
+        ok: bool,
+    },
+    Error {
+        error: String,
+    },
+}
+
+pub fn display_address_for_bind(bind: SocketAddr) -> String {
+    let ip = match bind.ip() {
+        IpAddr::V4(ip) if ip.is_unspecified() => likely_local_ipv4(),
+        IpAddr::V6(ip) if ip.is_unspecified() => likely_local_ipv4(),
+        ip => ip,
+    };
+    format_display_address(SocketAddr::new(ip, bind.port()))
+}
+
+fn likely_local_ipv4() -> IpAddr {
+    UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
+        .and_then(|socket| {
+            let _ = socket.connect((Ipv4Addr::new(1, 1, 1, 1), 80));
+            socket.local_addr()
+        })
+        .map(|address| address.ip())
+        .ok()
+        .filter(|ip| !ip.is_loopback() && ip.is_ipv4())
+        .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST))
+}
+
+fn format_display_address(address: SocketAddr) -> String {
+    if address.port() == default_port() {
+        address.ip().to_string()
+    } else {
+        address.to_string()
+    }
+}
+
 fn app(state: AppState) -> Router {
     let auth_state = state.clone();
     Router::new()
@@ -140,6 +320,8 @@ fn app(state: AppState) -> Router {
         .route("/v1/status", get(status))
         .route("/v1/history", get(history))
         .route_layer(middleware::from_fn_with_state(auth_state, require_auth))
+        .route("/v1/pair/info", get(pair_info))
+        .route("/v1/pair/claim", post(pair_claim))
         .with_state(state)
 }
 
@@ -149,6 +331,7 @@ struct AppState {
     socket_path: Arc<PathBuf>,
     database: Arc<Database>,
     playback_state: SharedPlaybackState,
+    pairing: Arc<PairingManager>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -176,6 +359,26 @@ struct ControlResponse {
 #[derive(Debug, Serialize)]
 struct ErrorResponse {
     error: String,
+}
+
+#[derive(Debug, Serialize)]
+struct PairInfoResponse {
+    pairing: bool,
+    receiver_name: String,
+    expires_in: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct PairClaimRequest {
+    code: String,
+    device_name: String,
+}
+
+#[derive(Debug, Serialize)]
+struct PairClaimResponse {
+    protocol_version: u8,
+    receiver_name: String,
+    token: String,
 }
 
 #[derive(Debug)]
@@ -317,6 +520,112 @@ async fn history(
     info!(request_type = "history", "HTTP request");
     let history = run_db_command(state, |database| database.history()).await?;
     Ok(Json(history))
+}
+
+async fn pair_info(
+    State(state): State<AppState>,
+) -> std::result::Result<Json<PairInfoResponse>, AppError> {
+    match state.pairing.status().await {
+        PairingStatus::Active {
+            receiver_name,
+            expires_in,
+            ..
+        } => Ok(Json(PairInfoResponse {
+            pairing: true,
+            receiver_name,
+            expires_in,
+        })),
+        PairingStatus::Inactive => Err(AppError::new(StatusCode::FORBIDDEN, "pairing_not_active")),
+    }
+}
+
+async fn pair_claim(
+    State(state): State<AppState>,
+    request: Result<Json<PairClaimRequest>, JsonRejection>,
+) -> std::result::Result<Json<PairClaimResponse>, AppError> {
+    let Json(request) =
+        request.map_err(|_| AppError::new(StatusCode::BAD_REQUEST, "invalid_request"))?;
+    if request.device_name.trim().is_empty() {
+        return Err(AppError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_device_name",
+        ));
+    }
+
+    match state.pairing.begin_claim(&request.code).await {
+        ClaimDecision::Accepted => {}
+        ClaimDecision::Inactive => {
+            return Err(AppError::new(StatusCode::FORBIDDEN, "pairing_not_active"));
+        }
+        ClaimDecision::InvalidRequest => {
+            return Err(AppError::new(
+                StatusCode::BAD_REQUEST,
+                "invalid_pairing_code",
+            ));
+        }
+        ClaimDecision::WrongCode { remaining_attempts } => {
+            warn!(remaining_attempts, "pairing_attempt_failed");
+            return Err(AppError::new(
+                StatusCode::UNAUTHORIZED,
+                "invalid_pairing_code",
+            ));
+        }
+        ClaimDecision::AttemptsExhausted => {
+            warn!("pairing_attempts_exhausted");
+            return Err(AppError::new(
+                StatusCode::TOO_MANY_REQUESTS,
+                "pairing_attempts_exhausted",
+            ));
+        }
+    }
+
+    let receiver_name = match state.pairing.status().await {
+        PairingStatus::Active { receiver_name, .. } => receiver_name,
+        PairingStatus::Inactive => {
+            state.pairing.fail_claim().await;
+            return Err(AppError::new(StatusCode::FORBIDDEN, "pairing_not_active"));
+        }
+    };
+    let device_name = request.device_name;
+    let database = Arc::clone(&state.database);
+    let device_name_for_db = device_name.clone();
+    let token = tokio::task::spawn_blocking(move || {
+        if database
+            .authorized_devices()?
+            .iter()
+            .any(|device| device.name == device_name_for_db)
+        {
+            anyhow::bail!("duplicate authorized device");
+        }
+        authorize_device(&database, &device_name_for_db)
+    })
+    .await
+    .map_err(|error| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
+    .map_err(|error| {
+        if error.to_string().contains("duplicate authorized device")
+            || error.to_string().contains("UNIQUE constraint")
+        {
+            AppError::new(StatusCode::CONFLICT, "device_name_exists")
+        } else {
+            AppError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
+        }
+    });
+
+    let token = match token {
+        Ok(token) => token,
+        Err(error) => {
+            state.pairing.fail_claim().await;
+            return Err(error);
+        }
+    };
+
+    info!(device_name = %device_name, "pairing_succeeded");
+    state.pairing.complete_claim(device_name).await;
+    Ok(Json(PairClaimResponse {
+        protocol_version: 1,
+        receiver_name,
+        token,
+    }))
 }
 
 async fn require_auth(
@@ -803,6 +1112,12 @@ fn create_runtime_dir(socket_path: &Path) -> AnyhowResult<()> {
             "failed to create runtime directory {}",
             runtime_dir.display()
         )
+    })?;
+    fs::set_permissions(runtime_dir, fs::Permissions::from_mode(0o700)).with_context(|| {
+        format!(
+            "failed to set runtime directory permissions on {}",
+            runtime_dir.display()
+        )
     })
 }
 
@@ -845,6 +1160,52 @@ fn prepare_mpv_socket_path(socket_path: &Path) -> AnyhowResult<()> {
         Err(error) => Err(error).with_context(|| {
             format!(
                 "failed to connect to existing mpv IPC socket {}",
+                socket_path.display()
+            )
+        }),
+    }
+}
+
+fn prepare_control_socket_path(socket_path: &Path) -> AnyhowResult<()> {
+    create_runtime_dir(socket_path)?;
+    let metadata = match fs::symlink_metadata(socket_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "failed to inspect control socket path {}",
+                    socket_path.display()
+                )
+            });
+        }
+    };
+
+    if !metadata.file_type().is_socket() {
+        return Err(anyhow::anyhow!(
+            "control socket path {} exists but is not a Unix socket",
+            socket_path.display()
+        ));
+    }
+
+    match UnixStream::connect(socket_path) {
+        Ok(_) => Err(anyhow::anyhow!(
+            "control socket {} is already in use; stop the existing receiver before starting a new one",
+            socket_path.display()
+        )),
+        Err(error) if error.kind() == ErrorKind::ConnectionRefused => {
+            fs::remove_file(socket_path).with_context(|| {
+                format!(
+                    "failed to remove stale control socket {}",
+                    socket_path.display()
+                )
+            })?;
+            Ok(())
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| {
+            format!(
+                "failed to connect to existing control socket {}",
                 socket_path.display()
             )
         }),
@@ -904,6 +1265,7 @@ mod tests {
             socket_path: Arc::new(PathBuf::from("/tmp/ura.sock")),
             database: Arc::new(Database::open(db_path.clone()).expect("open test database")),
             playback_state: shared_playback_state(),
+            pairing: Arc::new(PairingManager::new("kamo".to_string())),
         };
         (state, db_path)
     }
@@ -1082,6 +1444,112 @@ mod tests {
         );
 
         let _ = fs::remove_file(db_path);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pair_info_is_forbidden_when_inactive() {
+        let (state, db_path) = test_state();
+        let server = TestServer::start(state).await;
+
+        let response = server
+            .request("GET /v1/pair/info HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await;
+
+        assert!(response.starts_with("HTTP/1.1 403"), "{response}");
+        assert!(response.contains("pairing_not_active"));
+        let _ = fs::remove_file(db_path);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pair_info_returns_minimal_active_state() {
+        let (state, db_path) = test_state();
+        state
+            .pairing
+            .start_for_test("482913", std::time::Duration::from_secs(120))
+            .await;
+        let server = TestServer::start(state).await;
+
+        let response = server
+            .request("GET /v1/pair/info HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await;
+
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        assert!(response.contains(r#""receiver_name":"kamo""#));
+        assert!(response.contains(r#""expires_in":"#));
+        assert!(!response.contains("482913"));
+        assert!(!response.contains("token"));
+        let _ = fs::remove_file(db_path);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pair_claim_errors_are_consistent() {
+        let (state, db_path) = test_state();
+        state
+            .pairing
+            .start_for_test("482913", std::time::Duration::from_secs(120))
+            .await;
+        let server = TestServer::start(state).await;
+
+        let malformed = server
+            .request("POST /v1/pair/claim HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 1\r\nConnection: close\r\n\r\n{")
+            .await;
+        assert!(malformed.starts_with("HTTP/1.1 400"), "{malformed}");
+        assert!(malformed.contains("invalid_request"));
+
+        let invalid_code = server
+            .request("POST /v1/pair/claim HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 37\r\nConnection: close\r\n\r\n{\"code\":\"bad\",\"device_name\":\"desuwa\"}")
+            .await;
+        assert!(invalid_code.starts_with("HTTP/1.1 400"), "{invalid_code}");
+
+        let wrong = server
+            .request("POST /v1/pair/claim HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 40\r\nConnection: close\r\n\r\n{\"code\":\"111111\",\"device_name\":\"desuwa\"}")
+            .await;
+        assert!(wrong.starts_with("HTTP/1.1 401"), "{wrong}");
+
+        let _ = fs::remove_file(db_path);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn correct_pair_claim_returns_token_and_closes_pairing() {
+        let (state, db_path) = test_state();
+        state
+            .pairing
+            .start_for_test("482913", std::time::Duration::from_secs(120))
+            .await;
+        let server = TestServer::start(state.clone()).await;
+
+        let response = server
+            .request("POST /v1/pair/claim HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 40\r\nConnection: close\r\n\r\n{\"code\":\"482913\",\"device_name\":\"desuwa\"}")
+            .await;
+
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        let body = response_body(&response);
+        let claim: PairClaimResponseForTest = serde_json::from_str(body).expect("claim JSON");
+        assert_eq!(claim.protocol_version, 1);
+        assert_eq!(claim.receiver_name, "kamo");
+        assert!(claim.token.len() >= 64);
+        assert_eq!(state.pairing.status().await, PairingStatus::Inactive);
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {}", claim.token)).expect("auth header"),
+        );
+        authorize(&headers, &state).expect("paired token should authenticate");
+
+        let second = server
+            .request("POST /v1/pair/claim HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 40\r\nConnection: close\r\n\r\n{\"code\":\"482913\",\"device_name\":\"second\"}")
+            .await;
+        assert!(second.starts_with("HTTP/1.1 403"), "{second}");
+
+        let _ = fs::remove_file(db_path);
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct PairClaimResponseForTest {
+        protocol_version: u8,
+        receiver_name: String,
+        token: String,
     }
 
     #[test]
@@ -1314,5 +1782,12 @@ mod tests {
             .read_to_string(&mut response)
             .expect("read raw HTTP response");
         response
+    }
+
+    fn response_body(response: &str) -> &str {
+        response
+            .split_once("\r\n\r\n")
+            .map(|(_, body)| body)
+            .expect("HTTP response has body separator")
     }
 }

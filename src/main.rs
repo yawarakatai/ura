@@ -1,11 +1,23 @@
-use anyhow::Result;
+use std::{
+    io::{self, IsTerminal, Read, Write},
+    net::Shutdown,
+    os::unix::net::UnixStream,
+    time::Duration,
+};
+
+use anyhow::{Context, Result};
 use clap::Parser;
+use serde::{Deserialize, Serialize};
 use ura::{
     cli::{Cli, Command, ConfigCommand, DeviceCommand, LoopCommand, TokenCommand},
-    client::HttpClient,
-    config::{Config, ConfigInit, DeviceConfig, ReceiverConfig, generate_token},
-    db::{Database, HistoryEntry},
+    client::{HttpClient, PairingHttpClient},
+    config::{
+        Config, ConfigInit, DeviceConfig, ReceiverConfig, default_control_socket_path,
+        default_device_name, generate_token, normalize_receiver_address,
+    },
+    db::{Database, HistoryEntry, authorize_device},
     mpv::{LoopStatus, MpvStatus},
+    pairing::{PairingCompletion, PairingStatus, valid_pairing_code},
     receiver::run_serve,
 };
 
@@ -88,6 +100,31 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
+        Command::Pair {
+            address,
+            code,
+            device_name,
+            name,
+            select,
+            no_select,
+        } => match address {
+            Some(address) => {
+                pair_controller(
+                    cli.config.as_deref(),
+                    &address,
+                    code,
+                    device_name,
+                    name,
+                    select,
+                    no_select,
+                )?;
+                Ok(())
+            }
+            None => {
+                pair_receiver().await?;
+                Ok(())
+            }
+        },
         Command::Config { command } => match command {
             ConfigCommand::Init {
                 force,
@@ -140,9 +177,8 @@ async fn main() -> Result<()> {
                 Ok(())
             }
             DeviceCommand::Authorize { name } => {
-                let token = generate_token()?;
                 let database = Database::open(ura::config::default_db_path()?)?;
-                database.authorize_device(&name, &token)?;
+                let token = authorize_device(&database, &name)?;
                 println!("Authorized device \"{name}\".");
                 println!();
                 println!("Token:");
@@ -175,6 +211,258 @@ async fn main() -> Result<()> {
             Ok(())
         }
     }
+}
+
+async fn pair_receiver() -> Result<()> {
+    let started: ControlSocketResponse = control_socket_request("pair_start")?;
+    let ControlSocketResponse::PairStart {
+        code,
+        expires_in,
+        address,
+    } = started
+    else {
+        match started {
+            ControlSocketResponse::Error { error } => anyhow::bail!("{error}"),
+            _ => anyhow::bail!("receiver returned an unexpected pairing response"),
+        }
+    };
+
+    println!("ura pairing");
+    println!();
+    println!("address:");
+    println!("  {address}");
+    println!();
+    println!("code:");
+    println!("  {code}");
+    println!();
+    println!("expires in:");
+    println!("  {expires_in} seconds");
+    println!();
+    println!("waiting for a device...");
+
+    loop {
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => {
+                result.with_context(|| "failed to listen for Ctrl+C")?;
+                if let Ok(ControlSocketResponse::Ok { ok }) =
+                    control_socket_request::<ControlSocketResponse>("pair_cancel")
+                {
+                    let _ = ok;
+                }
+                println!("pairing cancelled");
+                return Ok(());
+            }
+            _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                match control_socket_request::<ControlSocketResponse>("pair_status") {
+                    Ok(ControlSocketResponse::PairStatus { completion, status }) => {
+                        match completion {
+                            PairingCompletion::Paired { device_name } => {
+                                println!();
+                                println!("paired device:");
+                                println!("  {device_name}");
+                                return Ok(());
+                            }
+                            PairingCompletion::Expired => {
+                                println!("pairing expired");
+                                return Ok(());
+                            }
+                            PairingCompletion::AttemptsExhausted => {
+                                println!("pairing closed after too many invalid attempts");
+                                return Ok(());
+                            }
+                            PairingCompletion::Cancelled | PairingCompletion::Inactive => {
+                                println!("pairing closed");
+                                return Ok(());
+                            }
+                            PairingCompletion::Active => {
+                                if matches!(status, PairingStatus::Inactive) {
+                                    println!("pairing expired");
+                                    return Ok(());
+                                }
+                            }
+                        }
+                    }
+                    Ok(ControlSocketResponse::Error { error }) => anyhow::bail!("{error}"),
+                    Ok(_) => anyhow::bail!("receiver returned an unexpected pairing status response"),
+                    Err(error) => anyhow::bail!("receiver became unavailable: {error:#}"),
+                }
+            }
+        }
+    }
+}
+
+fn pair_controller(
+    config_path: Option<&std::path::Path>,
+    address: &str,
+    code: Option<String>,
+    device_name: Option<String>,
+    name: Option<String>,
+    select: bool,
+    no_select: bool,
+) -> Result<()> {
+    let normalized_address = normalize_receiver_address(address)?;
+    let pairing_client = PairingHttpClient::new(normalized_address.clone())?;
+    let info = pairing_client.info()?;
+    let existing_config = DeviceConfig::load(config_path)?;
+    let tty = io::stdin().is_terminal();
+    let default_local_name = existing_config
+        .local_name
+        .clone()
+        .unwrap_or_else(default_device_name);
+    let default_receiver_alias = info.receiver_name.clone();
+
+    let code = match code {
+        Some(code) => code,
+        None if tty => prompt("pairing code", None)?,
+        None => anyhow::bail!("--code is required when stdin is not a TTY"),
+    };
+    if !valid_pairing_code(&code) {
+        anyhow::bail!("pairing code must be six decimal digits");
+    }
+
+    let local_name = match device_name {
+        Some(name) => name,
+        None if existing_config.local_name.is_some() => default_local_name.clone(),
+        None if tty => prompt("this device name", Some(&default_local_name))?,
+        None => anyhow::bail!("--device-name is required when stdin is not a TTY"),
+    };
+    let receiver_alias = match name {
+        Some(name) => name,
+        None if tty => prompt("save receiver as", Some(&default_receiver_alias))?,
+        None => anyhow::bail!("--name is required when stdin is not a TTY"),
+    };
+
+    if existing_config
+        .devices
+        .iter()
+        .any(|device| device.name == receiver_alias)
+    {
+        anyhow::bail!("device `{receiver_alias}` already exists");
+    }
+
+    let should_select = if select {
+        true
+    } else if no_select {
+        false
+    } else if tty {
+        prompt_yes_no("select this receiver?", true)?
+    } else {
+        anyhow::bail!("--select or --no-select is required when stdin is not a TTY");
+    };
+
+    let claim = pairing_client.claim(&code, &local_name)?;
+    if claim.protocol_version != 1 {
+        anyhow::bail!(
+            "receiver returned unsupported pairing protocol {}",
+            claim.protocol_version
+        );
+    }
+
+    match DeviceConfig::add_paired(
+        config_path,
+        &receiver_alias,
+        &normalized_address,
+        &claim.token,
+        &local_name,
+        should_select,
+    ) {
+        Ok(()) => {
+            println!("paired with \"{receiver_alias}\"");
+            if should_select {
+                println!("selected device: {receiver_alias}");
+            }
+            Ok(())
+        }
+        Err(error) => {
+            println!("pairing succeeded on the receiver, but local config could not be saved");
+            println!();
+            println!("token:");
+            println!("  {}", claim.token);
+            Err(error)
+        }
+    }
+}
+
+fn prompt(label: &str, default: Option<&str>) -> Result<String> {
+    match default {
+        Some(default) => print!("{label} [{default}]: "),
+        None => print!("{label}: "),
+    }
+    io::stdout().flush()?;
+    let mut value = String::new();
+    io::stdin().read_line(&mut value)?;
+    let value = value.trim();
+    if value.is_empty() {
+        default
+            .map(str::to_string)
+            .ok_or_else(|| anyhow::anyhow!("{label} is required"))
+    } else {
+        Ok(value.to_string())
+    }
+}
+
+fn prompt_yes_no(label: &str, default_yes: bool) -> Result<bool> {
+    let suffix = if default_yes { "[Y/n]" } else { "[y/N]" };
+    print!("{label} {suffix}: ");
+    io::stdout().flush()?;
+    let mut value = String::new();
+    io::stdin().read_line(&mut value)?;
+    let value = value.trim().to_ascii_lowercase();
+    if value.is_empty() {
+        return Ok(default_yes);
+    }
+    match value.as_str() {
+        "y" | "yes" => Ok(true),
+        "n" | "no" => Ok(false),
+        _ => anyhow::bail!("expected yes or no"),
+    }
+}
+
+fn control_socket_request<T>(command: &str) -> Result<T>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    let socket_path = default_control_socket_path()?;
+    let mut stream = UnixStream::connect(&socket_path).with_context(|| {
+        format!(
+            "ura serve is not running or control socket is unavailable at {}",
+            socket_path.display()
+        )
+    })?;
+    let request = serde_json::to_vec(&ControlSocketRequest { command })?;
+    stream.write_all(&request)?;
+    stream.shutdown(Shutdown::Write)?;
+
+    let mut response = String::new();
+    stream.read_to_string(&mut response)?;
+    let response: T = serde_json::from_str(&response)
+        .with_context(|| "failed to parse receiver control response")?;
+    Ok(response)
+}
+
+#[derive(Debug, Serialize)]
+struct ControlSocketRequest<'a> {
+    command: &'a str,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ControlSocketResponse {
+    PairStart {
+        code: String,
+        expires_in: u64,
+        address: String,
+    },
+    PairStatus {
+        status: PairingStatus,
+        completion: PairingCompletion,
+    },
+    Ok {
+        ok: bool,
+    },
+    Error {
+        error: String,
+    },
 }
 
 fn command_to_device(parent_to: &Option<String>, command: &Option<LoopCommand>) -> Option<String> {
@@ -426,6 +714,7 @@ mod tests {
     #[test]
     fn device_list_rendering_hides_token_material() {
         let config = DeviceConfig {
+            local_name: None,
             selected_device: Some("kamo".to_string()),
             devices: vec![ura::config::RemoteDevice {
                 name: "kamo".to_string(),

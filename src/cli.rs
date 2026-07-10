@@ -65,6 +65,26 @@ pub enum Command {
         #[command(subcommand)]
         command: Option<LoopCommand>,
     },
+    /// Pair this receiver or pair with another receiver.
+    Pair {
+        /// Receiver address to add on this controller.
+        address: Option<String>,
+        /// Six-digit pairing code shown on the receiver.
+        #[arg(long)]
+        code: Option<String>,
+        /// This controller's device name stored on the receiver.
+        #[arg(long)]
+        device_name: Option<String>,
+        /// Local alias for the receiver being added.
+        #[arg(long)]
+        name: Option<String>,
+        /// Select the newly paired receiver without prompting.
+        #[arg(long, conflicts_with = "no_select")]
+        select: bool,
+        /// Do not select the newly paired receiver without prompting.
+        #[arg(long, conflicts_with = "select")]
+        no_select: bool,
+    },
     /// Manage remote and authorized devices.
     Device {
         #[command(subcommand)]
@@ -189,6 +209,21 @@ mod tests {
             ["ura", "loop", "queue"].as_slice(),
             ["ura", "loop", "status"].as_slice(),
             ["ura", "loop", "status", "--to", "kamo"].as_slice(),
+            ["ura", "pair"].as_slice(),
+            ["ura", "pair", "192.168.1.23"].as_slice(),
+            [
+                "ura",
+                "pair",
+                "192.168.1.23",
+                "--code",
+                "482913",
+                "--device-name",
+                "desuwa",
+                "--name",
+                "kamo",
+                "--select",
+            ]
+            .as_slice(),
             ["ura", "device", "list"].as_slice(),
             [
                 "ura",

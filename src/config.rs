@@ -28,6 +28,7 @@ pub struct RemoteDevice {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceConfig {
+    pub local_name: Option<String>,
     pub selected_device: Option<String>,
     pub devices: Vec<RemoteDevice>,
     pub legacy_device: Option<RemoteDevice>,
@@ -44,8 +45,14 @@ struct FileConfig {
     receiver_url: Option<String>,
     token: Option<String>,
     bind: Option<String>,
+    local: Option<FileLocal>,
     selected_device: Option<String>,
     devices: Option<Vec<FileDevice>>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct FileLocal {
+    name: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -145,6 +152,10 @@ impl DeviceConfig {
         {
             anyhow::bail!("selected device `{selected}` does not exist");
         }
+        let local_name = file_config.local.and_then(|local| local.name);
+        if let Some(name) = &local_name {
+            validate_device_name(name)?;
+        }
         let legacy_device = match (file_config.receiver_url, file_config.token) {
             (Some(url), Some(token)) if devices.is_empty() => Some(RemoteDevice {
                 name: "legacy".to_string(),
@@ -154,6 +165,7 @@ impl DeviceConfig {
             _ => None,
         };
         Ok(Self {
+            local_name,
             selected_device: file_config.selected_device,
             devices,
             legacy_device,
@@ -214,6 +226,40 @@ impl DeviceConfig {
             url: normalize_receiver_address(address)?,
             token: token.to_string(),
         });
+        write_device_config(&path, &config)
+    }
+
+    pub fn add_paired(
+        config_path: Option<&Path>,
+        receiver_alias: &str,
+        address: &str,
+        token: &str,
+        local_name: &str,
+        select: bool,
+    ) -> Result<()> {
+        validate_device_name(receiver_alias)?;
+        validate_device_name(local_name)?;
+        if token.trim().is_empty() {
+            anyhow::bail!("device token must not be empty");
+        }
+        let path = config_path_path(config_path)?;
+        let mut config = Self::load(config_path)?;
+        if config
+            .devices
+            .iter()
+            .any(|device| device.name == receiver_alias)
+        {
+            anyhow::bail!("device `{receiver_alias}` already exists");
+        }
+        config.local_name = Some(local_name.to_string());
+        config.devices.push(RemoteDevice {
+            name: receiver_alias.to_string(),
+            url: normalize_receiver_address(address)?,
+            token: token.to_string(),
+        });
+        if select {
+            config.selected_device = Some(receiver_alias.to_string());
+        }
         write_device_config(&path, &config)
     }
 
@@ -430,6 +476,14 @@ fn write_device_config(path: &Path, config: &DeviceConfig) -> Result<()> {
             toml_escape_string(selected)
         ));
     }
+    if let Some(local_name) = &config.local_name {
+        validate_device_name(local_name)?;
+        contents.push_str("[local]\n");
+        contents.push_str(&format!(
+            "name = \"{}\"\n\n",
+            toml_escape_string(local_name)
+        ));
+    }
     for device in &config.devices {
         validate_device_name(&device.name)?;
         if device.token.trim().is_empty() {
@@ -550,6 +604,11 @@ pub fn default_mpv_socket_path() -> Result<PathBuf> {
     Ok(PathBuf::from(runtime_dir).join("ura/mpv.sock"))
 }
 
+pub fn default_control_socket_path() -> Result<PathBuf> {
+    let runtime_dir = env::var_os("XDG_RUNTIME_DIR").ok_or(UraError::MissingRuntimeDir)?;
+    Ok(PathBuf::from(runtime_dir).join("ura/control.sock"))
+}
+
 pub fn default_db_path() -> Result<PathBuf> {
     if let Some(data_home) = env::var_os("XDG_DATA_HOME") {
         return Ok(PathBuf::from(data_home).join("ura/ura.db"));
@@ -557,6 +616,19 @@ pub fn default_db_path() -> Result<PathBuf> {
 
     let home = env::var_os("HOME").ok_or(UraError::MissingHome)?;
     Ok(PathBuf::from(home).join(".local/share/ura/ura.db"))
+}
+
+pub fn default_device_name() -> String {
+    env::var("HOSTNAME")
+        .ok()
+        .filter(|name| !name.trim().is_empty())
+        .or_else(|| {
+            fs::read_to_string("/proc/sys/kernel/hostname")
+                .ok()
+                .map(|name| name.trim().to_string())
+                .filter(|name| !name.is_empty())
+        })
+        .unwrap_or_else(|| "ura".to_string())
 }
 
 #[cfg(test)]
@@ -1014,6 +1086,7 @@ token = "dane-token"
     #[test]
     fn no_selected_device_error_is_actionable() {
         let config = DeviceConfig {
+            local_name: None,
             selected_device: None,
             devices: vec![RemoteDevice {
                 name: "kamo".to_string(),
@@ -1051,6 +1124,32 @@ token = "dane-token"
 
         let contents = fs::read_to_string(&path).expect("read config");
         assert!(contents.contains("dane-token"));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn paired_device_add_stores_local_name_and_optional_selection() {
+        let path = unique_path("paired-device");
+
+        DeviceConfig::add_paired(
+            Some(&path),
+            "kamo",
+            "192.168.1.23",
+            "pair-token",
+            "desuwa",
+            true,
+        )
+        .expect("add paired device");
+
+        let config = DeviceConfig::load(Some(&path)).expect("load devices");
+        assert_eq!(config.local_name.as_deref(), Some("desuwa"));
+        assert_eq!(config.selected_device.as_deref(), Some("kamo"));
+        assert_eq!(config.devices[0].url, "http://192.168.1.23:8765");
+
+        let contents = fs::read_to_string(&path).expect("read config");
+        assert!(contents.contains("[local]"));
+        assert!(contents.contains("name = \"desuwa\""));
 
         let _ = fs::remove_file(path);
     }

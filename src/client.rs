@@ -16,6 +16,63 @@ pub struct HttpClient {
     token: String,
 }
 
+pub struct PairingHttpClient {
+    base: ReceiverBase,
+}
+
+impl PairingHttpClient {
+    pub fn new(receiver_url: String) -> Result<Self> {
+        Ok(Self {
+            base: ReceiverBase::parse(&receiver_url)?,
+        })
+    }
+
+    pub fn info(&self) -> Result<PairInfo> {
+        self.send("GET", "/v1/pair/info", None)?.json()
+    }
+
+    pub fn claim(&self, code: &str, device_name: &str) -> Result<PairClaim> {
+        let body = serde_json::to_string(&PairClaimRequest { code, device_name })?;
+        self.send("POST", "/v1/pair/claim", Some(&body))?.json()
+    }
+
+    fn send(&self, method: &str, path: &str, body: Option<&str>) -> Result<HttpResponse> {
+        let mut stream = TcpStream::connect(&self.base.address)
+            .with_context(|| format!("failed to connect to receiver at {}", self.base.address))?;
+        let body = body.unwrap_or("");
+        let request = format!(
+            "{method} {}{path} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            self.base.path_prefix,
+            self.base.host_header,
+            body.len(),
+            body
+        );
+
+        stream
+            .write_all(request.as_bytes())
+            .with_context(|| "failed to send HTTP request to receiver")?;
+
+        let mut response = String::new();
+        stream
+            .read_to_string(&mut response)
+            .with_context(|| "failed to read HTTP response from receiver")?;
+        HttpResponse::parse(&response)
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct PairInfo {
+    pub receiver_name: String,
+    pub expires_in: u64,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct PairClaim {
+    pub protocol_version: u8,
+    pub receiver_name: String,
+    pub token: String,
+}
+
 impl HttpClient {
     pub fn new(receiver_url: String, token: String) -> Result<Self> {
         Ok(Self {
@@ -118,6 +175,12 @@ struct PlayRequest<'a> {
 #[derive(Debug, Serialize)]
 struct ControlRequest<'a> {
     command: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+struct PairClaimRequest<'a> {
+    code: &'a str,
+    device_name: &'a str,
 }
 
 #[derive(Debug, serde::Deserialize)]

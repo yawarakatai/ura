@@ -9,6 +9,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::config::generate_token;
 use crate::mpv::MediaMetadata;
 
 #[derive(Debug, Clone)]
@@ -327,6 +328,12 @@ pub fn validate_device_name(name: &str) -> Result<()> {
         anyhow::bail!("device name must not be empty");
     }
     Ok(())
+}
+
+pub fn authorize_device(database: &Database, name: &str) -> Result<String> {
+    let token = generate_token()?;
+    database.authorize_device(name, &token)?;
+    Ok(token)
 }
 
 fn update_last_seen_if_stale(conn: &Connection, id: i64, last_seen_at: Option<&str>) -> Result<()> {
