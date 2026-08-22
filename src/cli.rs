@@ -3,7 +3,11 @@ use std::{net::SocketAddr, path::PathBuf};
 use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
-#[command(name = "ura", version, about = "Play audio on this or another paired Linux device.")]
+#[command(
+    name = "ura",
+    version,
+    about = "Play audio on this or another paired Linux device."
+)]
 pub struct Cli {
     #[arg(long, global = true)]
     pub config: Option<PathBuf>,
@@ -185,9 +189,105 @@ pub enum DeviceCommand {
 
 #[cfg(test)]
 mod tests {
-    use clap::Parser;
+    use clap::{CommandFactory, Parser};
 
     use super::*;
+
+    #[test]
+    fn parses_current_public_commands() {
+        for args in [
+            ["ura", "serve"].as_slice(),
+            ["ura", "play", "https://youtu.be/example"].as_slice(),
+            ["ura", "play", "--to", "kamo", "https://youtu.be/example"].as_slice(),
+            ["ura", "queue", "https://youtu.be/example"].as_slice(),
+            ["ura", "pause"].as_slice(),
+            ["ura", "resume"].as_slice(),
+            ["ura", "toggle"].as_slice(),
+            ["ura", "stop"].as_slice(),
+            ["ura", "status"].as_slice(),
+            ["ura", "status", "--to", "kamo"].as_slice(),
+            ["ura", "history"].as_slice(),
+            ["ura", "history", "--to", "kamo"].as_slice(),
+            ["ura", "loop"].as_slice(),
+            ["ura", "loop", "off"].as_slice(),
+            ["ura", "loop", "off", "--to", "kamo"].as_slice(),
+            ["ura", "loop", "track"].as_slice(),
+            ["ura", "loop", "queue"].as_slice(),
+            ["ura", "loop", "status"].as_slice(),
+            ["ura", "loop", "status", "--to", "kamo"].as_slice(),
+            ["ura", "pair"].as_slice(),
+            ["ura", "pair", "192.168.1.23"].as_slice(),
+            [
+                "ura",
+                "pair",
+                "192.168.1.23",
+                "--code",
+                "482913",
+                "--device-name",
+                "desuwa",
+                "--name",
+                "kamo",
+                "--select",
+            ]
+            .as_slice(),
+            ["ura", "device", "list"].as_slice(),
+            [
+                "ura",
+                "device",
+                "add",
+                "kamo",
+                "192.168.1.23",
+                "--token",
+                "secret",
+            ]
+            .as_slice(),
+            ["ura", "device", "select"].as_slice(),
+            ["ura", "device", "select", "kamo"].as_slice(),
+            ["ura", "device", "remove", "kamo"].as_slice(),
+            ["ura", "device", "authorize", "desuwa"].as_slice(),
+            ["ura", "device", "revoke", "desuwa"].as_slice(),
+        ] {
+            Cli::try_parse_from(args).expect("current command should parse");
+        }
+    }
+
+    #[test]
+    fn rejects_removed_public_commands() {
+        for args in [
+            ["ura", "receive"].as_slice(),
+            ["ura", "enqueue", "https://youtu.be/example"].as_slice(),
+        ] {
+            Cli::try_parse_from(args).expect_err("removed command should be rejected");
+        }
+    }
+
+    #[test]
+    fn help_advertises_current_command_names_only() {
+        let command = Cli::command();
+        let subcommands = command
+            .get_subcommands()
+            .map(|command| command.get_name().to_string())
+            .collect::<Vec<_>>();
+        for expected in ["serve", "queue", "pause", "resume"] {
+            assert!(
+                subcommands.contains(&expected.to_string()),
+                "help should contain {expected}"
+            );
+        }
+        for removed in ["receive", "enqueue"] {
+            assert!(
+                !subcommands.contains(&removed.to_string()),
+                "help should not advertise {removed}"
+            );
+        }
+
+        let mut command = Cli::command();
+        let mut help = Vec::new();
+        command.write_long_help(&mut help).expect("write help");
+        let help = String::from_utf8(help).expect("help should be UTF-8");
+        assert!(help.contains("Add a media URL to the selected device's playback queue"));
+        assert!(help.contains("Play audio on this or another paired Linux device"));
+    }
 
     #[test]
     fn device_select_accepts_interactive_and_named_forms() {
