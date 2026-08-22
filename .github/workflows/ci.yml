@@ -6,55 +6,16 @@ on:
   pull_request:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.head_ref || github.ref_name }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: Move logging initialization before tests
-        if: github.event_name == 'pull_request'
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-
-          path = Path("src/main.rs")
-          text = path.read_text()
-          test_marker = "#[cfg(test)]\nmod tests {"
-          logging_marker = "fn init_serve_logging() {"
-          test_pos = text.find(test_marker)
-          logging_pos = text.find(logging_marker)
-          if test_pos == -1 or logging_pos == -1:
-              raise SystemExit("could not locate main test/logging sections")
-
-          if logging_pos > test_pos:
-              prefix = text[:logging_pos].rstrip()
-              logging_fn = text[logging_pos:].strip()
-              test_pos = prefix.find(test_marker)
-              text = (
-                  prefix[:test_pos].rstrip()
-                  + "\n\n"
-                  + logging_fn
-                  + "\n\n"
-                  + prefix[test_pos:].lstrip()
-                  + "\n"
-              )
-              path.write_text(text)
-          PY
-          cargo fmt
-          if ! git diff --quiet -- src/main.rs; then
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add src/main.rs
-            git commit -m "fix: move logging initialization before tests"
-            git push origin HEAD:${{ github.head_ref }}
-          fi
       - name: Check formatting
         run: cargo fmt --check
       - name: Run Clippy
