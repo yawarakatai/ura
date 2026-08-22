@@ -12,7 +12,7 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub config: Option<PathBuf>,
 
-    #[arg(long, global = true)]
+    #[arg(long = "peer-url", alias = "receiver-url", global = true)]
     pub receiver_url: Option<String>,
 
     #[arg(long, global = true)]
@@ -24,7 +24,8 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Start the long-running local ura node.
+    /// Run the long-running local ura node.
+    #[command(name = "daemon", alias = "serve")]
     Serve {
         /// Address for the peer HTTP API to bind.
         #[arg(long)]
@@ -101,7 +102,7 @@ pub enum Command {
         #[command(subcommand)]
         command: ConfigCommand,
     },
-    /// Manage receiver tokens.
+    /// Manage legacy peer API tokens.
     Token {
         #[command(subcommand)]
         command: TokenCommand,
@@ -150,11 +151,15 @@ pub enum ConfigCommand {
         #[arg(long)]
         force: bool,
 
-        /// Receiver URL to write into config.toml for legacy clients.
-        #[arg(long, default_value = "http://127.0.0.1:8765")]
+        /// Peer API URL to write into config.toml.
+        #[arg(
+            long = "peer-url",
+            alias = "receiver-url",
+            default_value = "http://127.0.0.1:8765"
+        )]
         receiver_url: String,
 
-        /// Bind address to write into config.toml for ura serve.
+        /// Peer API bind address to write into config.toml for `ura daemon`.
         #[arg(long, default_value = "127.0.0.1:8765")]
         bind: SocketAddr,
     },
@@ -162,13 +167,13 @@ pub enum ConfigCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum TokenCommand {
-    /// Print a new random receiver token.
+    /// Print a new random legacy peer API token.
     Generate,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum DeviceCommand {
-    /// List this device, configured peers, and authorized controllers.
+    /// List this device, configured peers, and authorized clients.
     List,
     /// Add a peer this node can control.
     Add {
@@ -181,9 +186,9 @@ pub enum DeviceCommand {
     Select { name: Option<String> },
     /// Remove a peer from local configuration.
     Remove { name: String },
-    /// Authorize a controller on this node.
+    /// Authorize a client on this node.
     Authorize { name: String },
-    /// Revoke a controller credential on this node.
+    /// Revoke a client credential on this node.
     Revoke { name: String },
 }
 
@@ -196,7 +201,7 @@ mod tests {
     #[test]
     fn parses_current_public_commands() {
         for args in [
-            ["ura", "serve"].as_slice(),
+            ["ura", "daemon"].as_slice(),
             ["ura", "play", "https://youtu.be/example"].as_slice(),
             ["ura", "play", "--to", "kamo", "https://youtu.be/example"].as_slice(),
             ["ura", "queue", "https://youtu.be/example"].as_slice(),
@@ -252,6 +257,18 @@ mod tests {
     }
 
     #[test]
+    fn legacy_serve_and_receiver_url_aliases_still_parse() {
+        Cli::try_parse_from(["ura", "serve"]).expect("legacy serve alias should parse");
+        Cli::try_parse_from([
+            "ura",
+            "--receiver-url",
+            "http://127.0.0.1:8765",
+            "status",
+        ])
+        .expect("legacy receiver-url alias should parse");
+    }
+
+    #[test]
     fn rejects_removed_public_commands() {
         for args in [
             ["ura", "receive"].as_slice(),
@@ -268,16 +285,16 @@ mod tests {
             .get_subcommands()
             .map(|command| command.get_name().to_string())
             .collect::<Vec<_>>();
-        for expected in ["serve", "queue", "pause", "resume"] {
+        for expected in ["daemon", "queue", "pause", "resume"] {
             assert!(
                 subcommands.contains(&expected.to_string()),
                 "help should contain {expected}"
             );
         }
-        for removed in ["receive", "enqueue"] {
+        for legacy_or_removed in ["serve", "receive", "enqueue"] {
             assert!(
-                !subcommands.contains(&removed.to_string()),
-                "help should not advertise {removed}"
+                !subcommands.contains(&legacy_or_removed.to_string()),
+                "help should not advertise {legacy_or_removed}"
             );
         }
 
