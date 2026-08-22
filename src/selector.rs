@@ -98,7 +98,7 @@ fn matches_query(device: &DeviceSummary, query: &str) -> bool {
     if query.is_empty() {
         return true;
     }
-    let kind = match device.kind {
+    let kind = match &device.kind {
         DeviceKind::ThisDevice => "this device",
         DeviceKind::Peer => "peer",
     };
@@ -139,7 +139,7 @@ fn render(
             } else {
                 ""
             };
-            match device.kind {
+            match &device.kind {
                 DeviceKind::ThisDevice => {
                     writeln!(
                         tty,
