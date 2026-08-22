@@ -1,6 +1,6 @@
 # Development
 
-Status: Current behavior.
+Status: Current `0.3.0` behavior.
 
 Use the project Nix flake for development and validation commands that need the
 expected toolchain or runtime tools.
@@ -12,24 +12,23 @@ nix develop
 ```
 
 The shell includes Rust tooling plus Node.js, `mpv`, `yt-dlp`, and SQLite.
-
 You can also run one command inside the shell:
 
 ```bash
-nix develop -c cargo test
+nix develop -c cargo test --locked
 ```
 
-## Validation Commands
+## Verification Checklist
 
-Run focused checks while developing:
+For code changes, verify in this order:
 
-```bash
-nix develop -c cargo fmt --check
-nix develop -c cargo clippy -- -D warnings
-nix develop -c cargo test
-nix develop -c node --test extension/lib.test.js
-nix develop -c nix flake check
-```
+1. `nix develop -c cargo fmt --check`
+2. `nix develop -c cargo clippy --locked --all-targets -- -D warnings`
+3. `nix develop -c cargo test --locked`
+4. `nix develop -c cargo check --locked --all-targets`
+5. `nix develop -c node --test extension/lib.test.js`
+6. `nix develop -c nix flake check`
+7. Run the relevant manual smoke test when user-visible routing or playback changes.
 
 The full local gate is:
 
@@ -37,163 +36,141 @@ The full local gate is:
 nix develop -c ./scripts/verify.sh
 ```
 
-`scripts/verify.sh` checks for `mpv`, `node`, `yt-dlp`, and `sqlite3`, then runs:
+## Local Node Smoke Test
 
-1. `cargo fmt --check`
-2. `cargo clippy -- -D warnings`
-3. `cargo test`
-4. `cargo check --all-targets`
-5. `node --test extension/lib.test.js`
-6. `nix flake check`
-
-## Local Real-Audio Smoke Test
-
-Use a real receiver and client in separate terminals:
+The local node is long-running. During repository development, use separate
+terminals:
 
 ```bash
+# terminal A
 nix develop
-cargo run -- config init
 cargo run -- serve
 ```
 
-Then:
-
 ```bash
+# terminal B
 nix develop
+cargo run -- device list
 cargo run -- play "https://youtu.be/..."
 cargo run -- status
 cargo run -- toggle
 cargo run -- stop
 ```
 
-Use a short known-good YouTube URL and verify that audio plays through the
-receiver machine.
+With no peer selected, `device list` should show this device as selected and the
+URL should play through this machine's mpv instance.
 
-## Fake mpv Lifecycle Tests
+When testing an installed Home Manager configuration, use the user service
+instead of manually starting a second node process.
 
-For lifecycle work around receiver startup, shutdown, and socket handling, prefer
-automated tests where possible. Existing tests cover stale socket removal, live
-socket rejection, audio-only `mpv` startup arguments, API authentication, URL
-validation, and client request construction.
+## Self/Peer Routing Smoke Test
 
-Metadata tests use fake `mpv` IPC events such as:
+Use two machines or isolated environments. Verify the routing invariant:
 
-```json
-{"event":"file-loaded"}
-{"event":"property-change","id":1,"name":"media-title","data":"Example song"}
-{"event":"property-change","id":2,"name":"duration","data":222.5}
-{"event":"property-change","id":3,"name":"metadata","data":{"TITLE":"Example song","ARTIST":"Example artist"}}
-```
+1. Start `ura serve` on node A and node B.
+2. Expose node B's peer API explicitly when needed, for example
+   `ura serve --bind 0.0.0.0:8765`.
+3. Pair A with B.
+4. On A, select `This device` and confirm playback is local to A.
+5. On A, select B and confirm the same `ura play` command plays on B.
+6. On B, select some other destination if available, then send a peer request
+   from A to B and confirm it still terminates on B rather than being forwarded.
+7. Switch A back to `This device` through `ura device select` and confirm the
+   selection persists.
 
-The fake tests should cover persistent event consumption, command response
-request IDs, metadata normalization, queue association, stale-status clearing,
-and malformed or unknown events.
+`--to <name>` should override one command only and must not mutate the selected
+device.
 
-When manually testing with a fake or wrapped `mpv`, keep the fake earlier in
-`PATH` only for that shell and make sure it accepts the arguments used by
-`ura serve`.
+## Config Compatibility Verification
 
-## Local-Media Metadata Smoke Test
+Use an isolated configuration path when testing migrations. Cover:
 
-For a deterministic real-`mpv` smoke test that does not need the internet, use a
-local generated audio file with simple tags, then play it through a temporary
-test path or direct `mpv` wrapper when working on IPC behavior. Verify that the
-observer receives `file-loaded`, `media-title`, `duration`, and `metadata`
-without parsing logs.
-
-YouTube metadata smoke tests are optional and manual because they depend on
-network access and upstream availability. When running one, verify playback
-starts without a second metadata command, then check that `ura status` and
-`ura history` show a real title and never print literal `null`.
-
-## Multi-Device/Auth Verification
-
-Use isolated XDG directories before manual multi-device testing so local
-configuration and receiver history are untouched. Verify `device add`, `device
-select`, `device remove`, and `--to` destination override behavior. On the
-receiver side, verify that `device authorize` prints a token once, authorized
-tokens authenticate, `device revoke` rejects only the revoked token, the legacy
-configured token still works, and no token or token hash appears in normal
-output or logs. Successful authorized-device authentication updates
-`last_seen_at` no more than once per 60 seconds.
+1. Empty config → this device is the implicit destination.
+2. Legacy `receiver_url = "http://127.0.0.1:8765"` → this device, not a duplicate peer.
+3. Legacy remote `receiver_url` → usable compatibility peer.
+4. Adding/selecting/removing peers preserves unrelated top-level settings such
+   as `bind` and legacy receiver token fields.
+5. Selecting this device does not serialize a fake self peer.
+6. No token or token hash appears in normal `device list` output.
 
 ## Pairing Verification
 
-Use separate isolated XDG paths for receiver and controller, even when both run
-under the same Unix user:
+For peer pairing, use isolated XDG paths for the nodes under test. Pairing should
+cover:
 
-```bash
-export XDG_CONFIG_HOME=/tmp/ura-pair-receiver/config
-export XDG_DATA_HOME=/tmp/ura-pair-receiver/data
-export XDG_RUNTIME_DIR=/tmp/ura-pair-receiver/runtime
-mkdir -p "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_RUNTIME_DIR"
-chmod 700 "$XDG_RUNTIME_DIR"
-```
+1. `ura pair` starts a pairing session only through the local administrative
+   Unix socket.
+2. `ura pair <address>` claims the session and stores the returned peer token.
+3. Cancellation, expiry, wrong-code exhaustion, and malformed-code behavior.
+4. Normal bearer-protected endpoints remain protected while pairing is active.
+5. Successful authorized-device authentication updates `last_seen_at` no more
+   than once per 60 seconds.
+6. Codes, plaintext credentials, token hashes, and Authorization headers do not
+   appear in logs.
 
-Use a different `/tmp/ura-pair-controller/...` set for the controller shell.
+## Firefox Temporary Extension Test
 
-Pairing tests should cover:
+1. Start the local node with `cargo run -- serve` or the installed user service.
+2. Open Firefox and go to `about:debugging#/runtime/this-firefox`.
+3. Choose "Load Temporary Add-on" and select `extension/manifest.json`.
+4. Run `cargo run -- pair` and keep the six-digit code visible.
+5. Open the extension options.
+6. Enter the code and a browser name such as `Firefox`, then connect.
+7. Confirm the extension lists the same playback devices as
+   `cargo run -- device list`.
+8. Select a peer in the extension and confirm `cargo run -- device list` reports
+   the same selected device.
+9. Select this device from the CLI and confirm the extension reflects it.
+10. Open a supported YouTube URL and click the toolbar action; confirm the node's
+    current selected destination plays it.
+11. Confirm no remote peer address/token is stored by new extension state and no
+    token appears in UI, console output, or notifications.
+12. Stop the local node and confirm the extension reports that the local ura node
+    is unreachable.
 
-- fake receiver/client pairing through `GET /v1/pair/info` and
-  `POST /v1/pair/claim`
-- isolated controller config updates after a successful claim
-- token secrecy checks: no code, plaintext token, token hash, or
-  `Authorization` header in logs
-- cancellation, expiry, wrong-code attempt exhaustion, and malformed-code cases
-- normal bearer-protected endpoints remaining protected while pairing is active
+The Firefox host permission should remain restricted to localhost. The browser
+control API is fixed to `127.0.0.1:8766` in `0.3.0` and should never bind to the
+peer API's LAN address.
 
-For an end-to-end smoke test, start `ura serve` in the receiver environment, run
-`ura pair` in another receiver-environment shell, then run
-`ura pair <address>` from the controller environment and verify `ura status`
-authenticates with the newly stored credential.
+## Fake mpv Lifecycle Tests
 
-## Firefox Temporary Extension Testing
+For lifecycle work around startup, shutdown, and socket handling, prefer
+automated tests where possible. Existing tests cover stale socket removal, live
+socket rejection, audio-only mpv startup arguments, API authentication, URL
+validation, and client request construction.
 
-1. Open Firefox.
-2. Go to `about:debugging#/runtime/this-firefox`.
-3. Click "Load Temporary Add-on".
-4. Select `extension/manifest.json`.
-5. Start `ura serve`.
-6. Run `ura pair` on the receiver and keep the six-digit code visible.
-7. Open the extension options.
-8. Enter the receiver address, pairing code, receiver name, and browser device
-   name, then click Pair.
-9. Confirm the receiver is saved and selected.
-10. Pair a second receiver, switch between receivers, and remove one receiver.
-11. Open a supported YouTube URL and click the toolbar button.
-12. Confirm the selected receiver plays it.
-13. Confirm no token appears in the UI, browser console, or notifications.
-14. To verify legacy migration, pre-populate `browser.storage.local` with
-    `receiverUrl` and `token`, reload the options page, and confirm a `default`
-    receiver is created while the legacy fields remain present.
+Runtime state and metadata must come from structured mpv JSON IPC events and
+properties. Do not parse human-readable mpv logs.
 
-The extension uses local storage for receiver devices and sends the current tab
-URL to `/v1/play` or `/v1/enqueue` on the selected receiver. If no receiver is
-selected, the toolbar action shows a notification that tells the user to pair or
-select one.
+## Metadata Smoke Test
+
+For deterministic IPC work, use a local generated audio file with simple tags or
+a controlled mpv wrapper. Verify `file-loaded`, `media-title`, `duration`, and
+`metadata` events are handled without log parsing.
+
+YouTube metadata smoke tests are manual because they depend on network/upstream
+behavior. Confirm playback starts, then check `ura status` and `ura history`
+show useful metadata and never print literal `null` for missing display values.
 
 ## Logging
 
-`ura serve` initializes tracing with `RUST_LOG` support. If `RUST_LOG` is not
-set, it defaults to `ura=info`.
-
-Examples:
+`ura serve` initializes tracing with `RUST_LOG` support and defaults to
+`ura=info`.
 
 ```bash
 RUST_LOG=ura=debug cargo run -- serve
 RUST_LOG=ura=info ura serve
 ```
 
-Logs should avoid printing full secrets. URL validation logs sanitized host and
-video-id context rather than full untrusted URLs.
+Logs must not print secrets. URL validation should log sanitized host/video-id
+context rather than full untrusted URLs.
 
 ## Quoting URLs
 
-Always quote URLs that contain shell metacharacters such as `&`:
+Always quote URLs containing shell metacharacters such as `&`:
 
 ```bash
 ura play "https://www.youtube.com/watch?v=abc123&list=ignored"
 ```
 
-Without quotes, the shell may split the command before `ura` receives the full
-URL.
+Without quotes, the shell may split the URL before ura receives it.
