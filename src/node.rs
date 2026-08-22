@@ -27,6 +27,7 @@ use crate::{
         normalize_receiver_address,
     },
     db::HistoryEntry,
+    local_api::run_local_api,
     mpv::{LoopStatus, MpvStatus},
     receiver::run_serve,
 };
@@ -212,7 +213,7 @@ pub async fn run_node(
     let local_token = token.unwrap_or(generate_token()?);
     let local_url = local_url_for_bind(bind);
     let runtime = Arc::new(NodeRuntime {
-        local_url,
+        local_url: local_url.clone(),
         local_token: local_token.clone(),
         config_path,
     });
@@ -229,18 +230,39 @@ pub async fn run_node(
         node_shutdown_rx,
     ));
 
+    let (local_api_shutdown, local_api_shutdown_rx) = oneshot::channel();
+    let mut local_api_shutdown = Some(local_api_shutdown);
+    let mut local_api_task = tokio::spawn(run_local_api(local_url, local_api_shutdown_rx));
+
     tokio::select! {
         result = &mut receiver_task => {
             if let Some(shutdown) = node_shutdown.take() {
                 let _ = shutdown.send(());
             }
+            if let Some(shutdown) = local_api_shutdown.take() {
+                let _ = shutdown.send(());
+            }
             flatten_task_result(result, "receiver")?;
-            let _ = node_task.await;
+            flatten_task_result(node_task.await, "node control socket")?;
+            flatten_task_result(local_api_task.await, "local control API")?;
             Ok(())
         }
         result = &mut node_task => {
+            if let Some(shutdown) = local_api_shutdown.take() {
+                let _ = shutdown.send(());
+            }
             flatten_task_result(result, "node control socket")?;
             receiver_task.abort();
+            let _ = local_api_task.await;
+            Ok(())
+        }
+        result = &mut local_api_task => {
+            if let Some(shutdown) = node_shutdown.take() {
+                let _ = shutdown.send(());
+            }
+            flatten_task_result(result, "local control API")?;
+            receiver_task.abort();
+            let _ = node_task.await;
             Ok(())
         }
     }
