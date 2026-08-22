@@ -4,6 +4,7 @@
   const LOCAL_NODE_URL = "http://127.0.0.1:8766";
   const DEFAULT_ACTION = "play";
   const DEFAULT_LOCAL_DEVICE_NAME = "Firefox";
+  const LEGACY_STORAGE_KEYS = ["receiverUrl", "token", "selectedDevice", "devices"];
 
   const DEFAULT_SETTINGS = {
     nodeToken: "",
@@ -28,12 +29,19 @@
     if (migratedToken && migratedToken !== stored.nodeToken) {
       await storage.local.set({ nodeToken: migratedToken });
     }
+    await clearLegacySettings(storage);
 
     return {
       nodeToken: String(migratedToken || ""),
       defaultAction: normalizeAction(stored.defaultAction),
       localDeviceName: String(stored.localDeviceName || DEFAULT_LOCAL_DEVICE_NAME),
     };
+  }
+
+  async function clearLegacySettings(storage) {
+    if (typeof storage.local.remove === "function") {
+      await storage.local.remove(LEGACY_STORAGE_KEYS);
+    }
   }
 
   function legacyLocalToken(stored) {
@@ -100,6 +108,7 @@
       defaultAction: normalizeAction(defaultAction),
       localDeviceName: deviceName,
     });
+    await clearLegacySettings(storage);
 
     return {
       nodeName: claim.receiver_name || info.receiver_name || "local ura",
@@ -204,10 +213,10 @@
 
   async function responseErrorMessage(response) {
     const errorCode = await readErrorCode(response);
-    if (errorCode === "invalid_pairing_code") {
+    if (errorCode.includes("invalid_pairing_code")) {
       return "Invalid pairing code.";
     }
-    if (errorCode === "device_name_exists") {
+    if (errorCode.includes("device_name_exists")) {
       return "This browser name is already authorized by ura.";
     }
     if (response.status === 401) {
