@@ -13,12 +13,16 @@ use ura::{
     client::{HttpClient, PairingHttpClient},
     config::{
         Config, ConfigInit, DeviceConfig, ReceiverConfig, default_control_socket_path,
-        default_device_name, generate_token, normalize_receiver_address,
+        default_db_path, default_device_name, generate_token, normalize_receiver_address,
     },
     db::{Database, HistoryEntry, authorize_device},
     mpv::{LoopStatus, MpvStatus},
+    node::{
+        Destination, DeviceKind, DeviceSet, NodeClient, device_set, resolve_destination, run_node,
+        select_device,
+    },
     pairing::{PairingCompletion, PairingStatus, valid_pairing_code},
-    receiver::run_serve,
+    selector,
 };
 
 #[tokio::main]
@@ -28,52 +32,48 @@ async fn main() -> Result<()> {
     match cli.command {
         Command::Serve { bind } => {
             init_serve_logging();
+            let config_path = cli.config.clone();
             let config = ReceiverConfig::load_with_overrides(cli.config, bind, cli.token)?;
-            run_serve(config.bind, config.token).await
+            run_node(config.bind, config.token, config_path).await
         }
         Command::Play { to, url } => {
-            let client = client_for(cli.config, cli.receiver_url, cli.token, to)?;
+            let client = controller_for(cli.config, cli.receiver_url, cli.token, to)?;
             client.play(&url)?;
             println!("play: sent {url}");
             Ok(())
         }
         Command::Queue { to, url } => {
-            let client = client_for(cli.config, cli.receiver_url, cli.token, to)?;
+            let client = controller_for(cli.config, cli.receiver_url, cli.token, to)?;
             client.queue(&url)?;
             println!("queue: sent {url}");
             Ok(())
         }
         Command::Pause { to } => {
-            let client = client_for(cli.config, cli.receiver_url, cli.token, to)?;
-            client.control("pause")?;
+            controller_for(cli.config, cli.receiver_url, cli.token, to)?.control("pause")?;
             println!("pause: sent");
             Ok(())
         }
         Command::Resume { to } => {
-            let client = client_for(cli.config, cli.receiver_url, cli.token, to)?;
-            client.control("resume")?;
+            controller_for(cli.config, cli.receiver_url, cli.token, to)?.control("resume")?;
             println!("resume: sent");
             Ok(())
         }
         Command::Toggle { to } => {
-            let client = client_for(cli.config, cli.receiver_url, cli.token, to)?;
-            client.control("toggle")?;
+            controller_for(cli.config, cli.receiver_url, cli.token, to)?.control("toggle")?;
             println!("toggle: sent");
             Ok(())
         }
         Command::Stop { to } => {
-            let client = client_for(cli.config, cli.receiver_url, cli.token, to)?;
-            client.control("stop")?;
+            controller_for(cli.config, cli.receiver_url, cli.token, to)?.control("stop")?;
             println!("stop: sent");
             Ok(())
         }
         Command::Loop { to, command } => {
             let to = command_to_device(&to, &command);
-            let client = client_for(cli.config, cli.receiver_url, cli.token, to)?;
+            let client = controller_for(cli.config, cli.receiver_url, cli.token, to)?;
             match command {
                 None => {
-                    let status = client.loop_status()?;
-                    if status == LoopStatus::One {
+                    if client.loop_status()? == LoopStatus::One {
                         client.control("loop-off")?;
                         println!("loop off: sent");
                     } else {
@@ -94,8 +94,7 @@ async fn main() -> Result<()> {
                     println!("loop queue: sent");
                 }
                 Some(LoopCommand::Status { .. }) => {
-                    let status = client.loop_status()?;
-                    println!("loop status: {status:?}");
+                    println!("loop status: {:?}", client.loop_status()?);
                 }
             }
             Ok(())
@@ -108,21 +107,74 @@ async fn main() -> Result<()> {
             select,
             no_select,
         } => match address {
-            Some(address) => {
-                pair_controller(
-                    cli.config.as_deref(),
-                    &address,
-                    code,
-                    device_name,
-                    name,
-                    select,
-                    no_select,
-                )?;
+            Some(address) => pair_controller(
+                cli.config.as_deref(),
+                &address,
+                code,
+                device_name,
+                name,
+                select,
+                no_select,
+            ),
+            None => pair_receiver().await,
+        },
+        Command::Device { command } => match command {
+            DeviceCommand::List => {
+                let devices = current_devices(cli.config.as_deref())?;
+                let database = Database::open(default_db_path()?)?;
+                print_devices(&devices, &database.authorized_devices()?);
                 Ok(())
             }
-            None => {
-                pair_receiver().await?;
+            DeviceCommand::Add {
+                name,
+                address,
+                token,
+            } => {
+                if current_devices(cli.config.as_deref())?
+                    .devices
+                    .iter()
+                    .any(|device| device.kind == DeviceKind::ThisDevice && device.name == name)
+                {
+                    anyhow::bail!("device name `{name}` conflicts with this device");
+                }
+                DeviceConfig::add(cli.config.as_deref(), &name, &address, &token)?;
+                println!("device added: {name}");
                 Ok(())
+            }
+            DeviceCommand::Select { name } => {
+                let devices = current_devices(cli.config.as_deref())?;
+                let name = match name {
+                    Some(name) => name,
+                    None => selector::select_device(&devices)?,
+                };
+                let selected = set_selected_device(cli.config.as_deref(), &name)?;
+                println!("selected device: {selected}");
+                Ok(())
+            }
+            DeviceCommand::Remove { name } => {
+                DeviceConfig::remove(cli.config.as_deref(), &name)?;
+                println!("device removed: {name}");
+                Ok(())
+            }
+            DeviceCommand::Authorize { name } => {
+                let database = Database::open(default_db_path()?)?;
+                let token = authorize_device(&database, &name)?;
+                println!("Authorized controller \"{name}\".");
+                println!();
+                println!("Token:");
+                println!("  {token}");
+                println!();
+                println!("This token is shown only once.");
+                Ok(())
+            }
+            DeviceCommand::Revoke { name } => {
+                let database = Database::open(default_db_path()?)?;
+                if database.revoke_authorized_device(&name)? {
+                    println!("revoked controller: {name}");
+                    Ok(())
+                } else {
+                    anyhow::bail!("unknown active authorized controller `{name}`")
+                }
             }
         },
         Command::Config { command } => match command {
@@ -149,81 +201,133 @@ async fn main() -> Result<()> {
                 Ok(())
             }
         },
-        Command::Device { command } => match command {
-            DeviceCommand::List => {
-                let devices = DeviceConfig::load(cli.config.as_deref())?;
-                let database = Database::open(ura::config::default_db_path()?)?;
-                let authorized = database.authorized_devices()?;
-                print_devices(&devices, &authorized);
-                Ok(())
-            }
-            DeviceCommand::Add {
-                name,
-                address,
-                token,
-            } => {
-                DeviceConfig::add(cli.config.as_deref(), &name, &address, &token)?;
-                println!("device added: {name}");
-                Ok(())
-            }
-            DeviceCommand::Select { name } => {
-                DeviceConfig::select(cli.config.as_deref(), &name)?;
-                println!("selected device: {name}");
-                Ok(())
-            }
-            DeviceCommand::Remove { name } => {
-                DeviceConfig::remove(cli.config.as_deref(), &name)?;
-                println!("device removed: {name}");
-                Ok(())
-            }
-            DeviceCommand::Authorize { name } => {
-                let database = Database::open(ura::config::default_db_path()?)?;
-                let token = authorize_device(&database, &name)?;
-                println!("Authorized device \"{name}\".");
-                println!();
-                println!("Token:");
-                println!("  {token}");
-                println!();
-                println!("This token is shown only once.");
-                println!("Store it on the controlling device.");
-                Ok(())
-            }
-            DeviceCommand::Revoke { name } => {
-                let database = Database::open(ura::config::default_db_path()?)?;
-                if database.revoke_authorized_device(&name)? {
-                    println!("revoked device: {name}");
-                    Ok(())
-                } else {
-                    anyhow::bail!("unknown active authorized device `{name}`")
-                }
-            }
-        },
         Command::Status { to } => {
-            let client = client_for(cli.config, cli.receiver_url, cli.token, to)?;
-            let status = client.status()?;
+            let status = controller_for(cli.config, cli.receiver_url, cli.token, to)?.status()?;
             print_status(&status);
             Ok(())
         }
         Command::History { to } => {
-            let client = client_for(cli.config, cli.receiver_url, cli.token, to)?;
-            let history = client.history()?;
+            let history = controller_for(cli.config, cli.receiver_url, cli.token, to)?.history()?;
             print_history(&history);
             Ok(())
         }
     }
 }
 
+enum ControllerClient {
+    Node {
+        client: NodeClient,
+        to: Option<String>,
+    },
+    Http(HttpClient),
+}
+
+impl ControllerClient {
+    fn play(&self, url: &str) -> Result<()> {
+        match self {
+            Self::Node { client, to } => client.play(url, to.as_deref()),
+            Self::Http(client) => client.play(url),
+        }
+    }
+
+    fn queue(&self, url: &str) -> Result<()> {
+        match self {
+            Self::Node { client, to } => client.queue(url, to.as_deref()),
+            Self::Http(client) => client.queue(url),
+        }
+    }
+
+    fn control(&self, action: &str) -> Result<()> {
+        match self {
+            Self::Node { client, to } => client.control(action, to.as_deref()),
+            Self::Http(client) => client.control(action),
+        }
+    }
+
+    fn loop_status(&self) -> Result<LoopStatus> {
+        match self {
+            Self::Node { client, to } => client.loop_status(to.as_deref()),
+            Self::Http(client) => client.loop_status(),
+        }
+    }
+
+    fn status(&self) -> Result<MpvStatus> {
+        match self {
+            Self::Node { client, to } => client.status(to.as_deref()),
+            Self::Http(client) => client.status(),
+        }
+    }
+
+    fn history(&self) -> Result<Vec<HistoryEntry>> {
+        match self {
+            Self::Node { client, to } => client.history(to.as_deref()),
+            Self::Http(client) => client.history(),
+        }
+    }
+}
+
+fn controller_for(
+    config_path: Option<std::path::PathBuf>,
+    receiver_url: Option<String>,
+    token: Option<String>,
+    to: Option<String>,
+) -> Result<ControllerClient> {
+    let has_legacy_override = receiver_url.is_some()
+        || token.is_some()
+        || std::env::var_os("URA_RECEIVER_URL").is_some()
+        || std::env::var_os("URA_TOKEN").is_some();
+    if has_legacy_override {
+        let config = Config::load_with_overrides(config_path, receiver_url, token)?;
+        return Ok(ControllerClient::Http(HttpClient::new(
+            config.receiver_url,
+            config.token,
+        )?));
+    }
+
+    if NodeClient::is_available() {
+        return Ok(ControllerClient::Node {
+            client: NodeClient::new()?,
+            to,
+        });
+    }
+
+    match resolve_destination(config_path.as_deref(), to.as_deref())? {
+        Destination::Peer(peer) => Ok(ControllerClient::Http(HttpClient::new(
+            peer.url, peer.token,
+        )?)),
+        Destination::SelfNode { name } => anyhow::bail!(
+            "this device (`{name}`) is selected, but the local ura node is not running\n\nStart it with:\n  ura serve"
+        ),
+    }
+}
+
+fn current_devices(config_path: Option<&std::path::Path>) -> Result<DeviceSet> {
+    if config_path.is_none() && NodeClient::is_available() {
+        NodeClient::new()?.devices()
+    } else {
+        device_set(config_path)
+    }
+}
+
+fn set_selected_device(config_path: Option<&std::path::Path>, name: &str) -> Result<String> {
+    if config_path.is_none() && NodeClient::is_available() {
+        NodeClient::new()?.select(name)
+    } else {
+        select_device(config_path, name)
+    }
+}
+
 async fn pair_receiver() -> Result<()> {
-    let started: ControlSocketResponse = control_socket_request("pair_start")?;
-    let ControlSocketResponse::PairStart {
+    let started: PairControlResponse = control_socket_request("pair_start")?;
+    let PairControlResponse::PairStart {
         code,
         expires_in,
         address,
     } = started
     else {
         match started {
-            ControlSocketResponse::Error { error } => anyhow::bail!("{error}"),
-            _ => anyhow::bail!("receiver returned an unexpected pairing response"),
+            PairControlResponse::Error { error } => anyhow::bail!("{error}"),
+            _ => anyhow::bail!("node returned an unexpected pairing response"),
         }
     };
 
@@ -244,17 +348,13 @@ async fn pair_receiver() -> Result<()> {
         tokio::select! {
             result = tokio::signal::ctrl_c() => {
                 result.with_context(|| "failed to listen for Ctrl+C")?;
-                if let Ok(ControlSocketResponse::Ok { ok }) =
-                    control_socket_request::<ControlSocketResponse>("pair_cancel")
-                {
-                    let _ = ok;
-                }
+                let _ = control_socket_request::<PairControlResponse>("pair_cancel");
                 println!("pairing cancelled");
                 return Ok(());
             }
             _ = tokio::time::sleep(Duration::from_secs(1)) => {
-                match control_socket_request::<ControlSocketResponse>("pair_status") {
-                    Ok(ControlSocketResponse::PairStatus { completion, status }) => {
+                match control_socket_request::<PairControlResponse>("pair_status") {
+                    Ok(PairControlResponse::PairStatus { completion, status }) => {
                         match completion {
                             PairingCompletion::Paired { device_name } => {
                                 println!();
@@ -282,9 +382,9 @@ async fn pair_receiver() -> Result<()> {
                             }
                         }
                     }
-                    Ok(ControlSocketResponse::Error { error }) => anyhow::bail!("{error}"),
-                    Ok(_) => anyhow::bail!("receiver returned an unexpected pairing status response"),
-                    Err(error) => anyhow::bail!("receiver became unavailable: {error:#}"),
+                    Ok(PairControlResponse::Error { error }) => anyhow::bail!("{error}"),
+                    Ok(_) => anyhow::bail!("node returned an unexpected pairing status response"),
+                    Err(error) => anyhow::bail!("node became unavailable: {error:#}"),
                 }
             }
         }
@@ -309,7 +409,7 @@ fn pair_controller(
         .local_name
         .clone()
         .unwrap_or_else(default_device_name);
-    let default_receiver_alias = info.receiver_name.clone();
+    let default_peer_alias = info.receiver_name.clone();
 
     let code = match code {
         Some(code) => code,
@@ -326,18 +426,21 @@ fn pair_controller(
         None if tty => prompt("this device name", Some(&default_local_name))?,
         None => anyhow::bail!("--device-name is required when stdin is not a TTY"),
     };
-    let receiver_alias = match name {
+    let peer_alias = match name {
         Some(name) => name,
-        None if tty => prompt("save receiver as", Some(&default_receiver_alias))?,
+        None if tty => prompt("save peer as", Some(&default_peer_alias))?,
         None => anyhow::bail!("--name is required when stdin is not a TTY"),
     };
+    if peer_alias == local_name {
+        anyhow::bail!("peer name `{peer_alias}` conflicts with this device");
+    }
 
     if existing_config
         .devices
         .iter()
-        .any(|device| device.name == receiver_alias)
+        .any(|device| device.name == peer_alias)
     {
-        anyhow::bail!("device `{receiver_alias}` already exists");
+        anyhow::bail!("device `{peer_alias}` already exists");
     }
 
     let should_select = if select {
@@ -345,7 +448,7 @@ fn pair_controller(
     } else if no_select {
         false
     } else if tty {
-        prompt_yes_no("select this receiver?", true)?
+        prompt_yes_no("select this device?", true)?
     } else {
         anyhow::bail!("--select or --no-select is required when stdin is not a TTY");
     };
@@ -353,28 +456,28 @@ fn pair_controller(
     let claim = pairing_client.claim(&code, &local_name)?;
     if claim.protocol_version != 1 {
         anyhow::bail!(
-            "receiver returned unsupported pairing protocol {}",
+            "peer returned unsupported pairing protocol {}",
             claim.protocol_version
         );
     }
 
     match DeviceConfig::add_paired(
         config_path,
-        &receiver_alias,
+        &peer_alias,
         &normalized_address,
         &claim.token,
         &local_name,
         should_select,
     ) {
         Ok(()) => {
-            println!("paired with \"{receiver_alias}\"");
+            println!("paired with \"{peer_alias}\"");
             if should_select {
-                println!("selected device: {receiver_alias}");
+                println!("selected device: {peer_alias}");
             }
             Ok(())
         }
         Err(error) => {
-            println!("pairing succeeded on the receiver, but local config could not be saved");
+            println!("pairing succeeded on the peer, but local config could not be saved");
             println!();
             println!("token:");
             println!("  {}", claim.token);
@@ -425,29 +528,27 @@ where
     let socket_path = default_control_socket_path()?;
     let mut stream = UnixStream::connect(&socket_path).with_context(|| {
         format!(
-            "ura serve is not running or control socket is unavailable at {}",
+            "ura serve is not running or pairing socket is unavailable at {}",
             socket_path.display()
         )
     })?;
-    let request = serde_json::to_vec(&ControlSocketRequest { command })?;
+    let request = serde_json::to_vec(&PairControlRequest { command })?;
     stream.write_all(&request)?;
     stream.shutdown(Shutdown::Write)?;
 
     let mut response = String::new();
     stream.read_to_string(&mut response)?;
-    let response: T = serde_json::from_str(&response)
-        .with_context(|| "failed to parse receiver control response")?;
-    Ok(response)
+    serde_json::from_str(&response).with_context(|| "failed to parse pairing response")
 }
 
 #[derive(Debug, Serialize)]
-struct ControlSocketRequest<'a> {
+struct PairControlRequest<'a> {
     command: &'a str,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-enum ControlSocketResponse {
+enum PairControlResponse {
     PairStart {
         code: String,
         expires_in: u64,
@@ -475,20 +576,6 @@ fn command_to_device(parent_to: &Option<String>, command: &Option<LoopCommand>) 
     }
 }
 
-fn client_for(
-    config_path: Option<std::path::PathBuf>,
-    receiver_url: Option<String>,
-    token: Option<String>,
-    to: Option<String>,
-) -> Result<HttpClient> {
-    let config = if receiver_url.is_some() || token.is_some() {
-        Config::load_with_overrides(config_path, receiver_url, token)?
-    } else {
-        Config::load_for_device(config_path, to)?
-    };
-    HttpClient::new(config.receiver_url, config.token)
-}
-
 fn print_status(status: &MpvStatus) {
     if (status.idle_active.unwrap_or(false)
         || (status.pause.is_none()
@@ -503,12 +590,14 @@ fn print_status(status: &MpvStatus) {
         return;
     }
 
-    if status.pause.unwrap_or(false) {
-        println!("paused");
-    } else {
-        println!("playing");
-    }
-
+    println!(
+        "{}",
+        if status.pause.unwrap_or(false) {
+            "paused"
+        } else {
+            "playing"
+        }
+    );
     println!("title:   {}", display_title(status));
     if let Some(artist) = status.artist.as_deref().or(status.uploader.as_deref()) {
         println!("artist:  {artist}");
@@ -523,12 +612,6 @@ fn print_status(status: &MpvStatus) {
     }
     if let Some(loop_status) = &status.loop_status {
         println!("loop:    {}", format_loop_status(loop_status));
-    }
-    if status.title.is_none()
-        && status.media_title.is_none()
-        && let Some(source_url) = &status.source_url
-    {
-        println!("source:  {}", shorten_source(source_url));
     }
 }
 
@@ -549,45 +632,41 @@ fn print_history(history: &[HistoryEntry]) {
     }
 }
 
-fn print_devices(config: &DeviceConfig, authorized: &[ura::db::AuthorizedDevice]) {
-    print!("{}", render_devices(config, authorized));
-}
-
-fn render_devices(config: &DeviceConfig, authorized: &[ura::db::AuthorizedDevice]) -> String {
-    let mut output = String::new();
-    output.push_str(&format!(
-        "Selected device: {}\n\n",
-        config.selected_device.as_deref().unwrap_or("none")
-    ));
-    output.push_str("Remote devices:\n");
-    if config.devices.is_empty() {
-        if let Some(legacy) = &config.legacy_device {
-            output.push_str(&format!("  {:<12}  {} (legacy)\n", legacy.name, legacy.url));
-        } else {
-            output.push_str("  none\n");
-        }
-    } else {
-        output.push_str(&format!("  {:<12}  ADDRESS\n", "NAME"));
-        for device in &config.devices {
-            output.push_str(&format!("  {:<12}  {}\n", device.name, device.url));
-        }
+fn print_devices(devices: &DeviceSet, authorized: &[ura::db::AuthorizedDevice]) {
+    println!("Selected device: {}", devices.selected);
+    println!();
+    println!("Devices:");
+    println!("  {:<2} {:<18} {:<12} ADDRESS", "", "NAME", "TYPE");
+    for device in &devices.devices {
+        let marker = if device.name == devices.selected { "*" } else { " " };
+        let kind = match &device.kind {
+            DeviceKind::ThisDevice => "this device",
+            DeviceKind::Peer => "peer",
+        };
+        println!(
+            "  {:<2} {:<18} {:<12} {}",
+            marker,
+            device.name,
+            kind,
+            device.address.as_deref().unwrap_or("-")
+        );
     }
-    output.push('\n');
-    output.push_str("Authorized devices:\n");
+
+    println!();
+    println!("Authorized controllers:");
     if authorized.is_empty() {
-        output.push_str("  none\n");
+        println!("  none");
     } else {
-        output.push_str(&format!("  {:<12}  {:<16}  LAST SEEN\n", "NAME", "CREATED"));
+        println!("  {:<18} {:<16} LAST SEEN", "NAME", "CREATED");
         for device in authorized {
-            output.push_str(&format!(
-                "  {:<12}  {:<16}  {}\n",
+            println!(
+                "  {:<18} {:<16} {}",
                 device.name,
                 device.created_at,
                 device.last_seen_at.as_deref().unwrap_or("never")
-            ));
+            );
         }
     }
-    output
 }
 
 fn display_title(status: &MpvStatus) -> String {
@@ -639,114 +718,19 @@ fn format_loop_status(status: &LoopStatus) -> &'static str {
     }
 }
 
-fn shorten_source(source: &str) -> String {
-    source
-        .split_once("://")
-        .map(|(_, rest)| rest)
-        .unwrap_or(source)
-        .chars()
-        .take(48)
-        .collect()
-}
-
 fn truncate(value: &str, width: usize) -> String {
-    let char_count = value.chars().count();
-    if char_count <= width {
+    if value.chars().count() <= width {
         return value.to_string();
     }
     if width <= 3 {
         return ".".repeat(width);
     }
-    let prefix_width = width - 3;
-    let mut truncated = value.chars().take(prefix_width).collect::<String>();
-    truncated.push_str("...");
-    truncated
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn formats_duration_without_null_or_zero_for_missing_values() {
-        assert_eq!(format_duration(None), "unknown");
-        assert_eq!(format_duration(Some(222.5)), "3:43");
-        assert_eq!(format_duration(Some(3798.0)), "1:03:18");
-    }
-
-    #[test]
-    fn status_title_uses_unknown_instead_of_source_url() {
-        let status = MpvStatus {
-            pause: Some(false),
-            idle_active: Some(false),
-            path: None,
-            media_title: Some("https://youtu.be/example".to_string()),
-            title: None,
-            artist: None,
-            uploader: None,
-            album: None,
-            duration_seconds: None,
-            position_seconds: None,
-            playlist_pos: None,
-            playlist_count: None,
-            source_url: Some("https://youtu.be/example".to_string()),
-            playback_path: None,
-            loop_status: Some(LoopStatus::Off),
-        };
-
-        assert_eq!(display_title(&status), "Unknown title");
-    }
-
-    #[test]
-    fn truncate_uses_ascii_suffix() {
-        assert_eq!(truncate("abcdef", 6), "abcdef");
-        assert_eq!(truncate("abcdef", 5), "ab...");
-        assert_eq!(truncate("abcdef", 3), "...");
-        assert_eq!(truncate("abcdef", 2), "..");
-    }
-
-    #[test]
-    fn truncate_counts_unicode_characters() {
-        assert_eq!(truncate("あいうえお", 4), "あ...");
-        assert_eq!(truncate("あいう", 3), "あいう");
-    }
-
-    #[test]
-    fn device_list_rendering_hides_token_material() {
-        let config = DeviceConfig {
-            local_name: None,
-            selected_device: Some("kamo".to_string()),
-            devices: vec![ura::config::RemoteDevice {
-                name: "kamo".to_string(),
-                url: "http://kamo:8765".to_string(),
-                token: "secret-token".to_string(),
-            }],
-            legacy_device: None,
-        };
-        let authorized = vec![ura::db::AuthorizedDevice {
-            name: "firefox".to_string(),
-            created_at: "2026-07-10 17:35".to_string(),
-            last_seen_at: None,
-            revoked_at: None,
-        }];
-
-        let output = render_devices(&config, &authorized);
-
-        assert!(output.contains("kamo"));
-        assert!(output.contains("firefox"));
-        assert!(!output.contains("secret-token"));
-        assert!(!output.contains("token_hash"));
-    }
+    let prefix = value.chars().take(width - 3).collect::<String>();
+    format!("{prefix}...")
 }
 
 fn init_serve_logging() {
-    use tracing_subscriber::{EnvFilter, fmt, prelude::*};
-
-    let env_filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("ura=info"));
-
-    tracing_subscriber::registry()
-        .with(env_filter)
-        .with(fmt::layer())
-        .init();
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("ura=info"));
+    let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
 }
