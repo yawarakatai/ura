@@ -16,7 +16,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - name: Run tests
+      - name: Run Rust tests
         run: cargo test
+      - name: Run Firefox extension tests
+        run: node --test extension/lib.test.js
       - name: Check formatting
         run: cargo fmt --check
