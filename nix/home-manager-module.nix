@@ -17,7 +17,7 @@ let
 in
 {
   options.services.ura = {
-    enable = lib.mkEnableOption "ura audio receiver";
+    enable = lib.mkEnableOption "ura audio node";
 
     package = lib.mkOption {
       type = lib.types.package;
@@ -30,7 +30,7 @@ in
       type = lib.types.str;
       default = "127.0.0.1:8765";
       example = "0.0.0.0:8765";
-      description = "Address and port on which ura listens.";
+      description = "Address and port on which ura accepts peer connections.";
     };
 
     logLevel = lib.mkOption {
@@ -47,7 +47,7 @@ in
 
     systemd.user.services.ura = {
       Unit = {
-        Description = "ura audio receiver";
+        Description = "ura audio node";
         After = [ "network.target" ];
       };
 
