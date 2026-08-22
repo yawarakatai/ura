@@ -77,7 +77,7 @@ enum NodeRequest {
 enum NodeResponse {
     Ok,
     LoopStatus { status: LoopStatus },
-    Status { status: MpvStatus },
+    Status { status: Box<MpvStatus> },
     History { entries: Vec<HistoryEntry> },
     Devices { devices: DeviceSet },
     Selected { name: String },
@@ -142,7 +142,7 @@ impl NodeClient {
         match self.request(NodeRequest::Status {
             to: to.map(str::to_string),
         })? {
-            NodeResponse::Status { status } => Ok(status),
+            NodeResponse::Status { status } => Ok(*status),
             other => unexpected_response(other),
         }
     }
@@ -373,7 +373,9 @@ async fn dispatch(request: NodeRequest, runtime: &NodeRuntime) -> Result<NodeRes
         }
         NodeRequest::Status { to } => {
             let status = route(runtime, to, |client| client.status()).await?;
-            Ok(NodeResponse::Status { status })
+            Ok(NodeResponse::Status {
+                status: Box::new(status),
+            })
         }
         NodeRequest::History { to } => {
             let entries = route(runtime, to, |client| client.history()).await?;
@@ -627,6 +629,18 @@ fn persist_device_config(config_path_override: Option<&Path>, config: &DeviceCon
     let table = root
         .as_table_mut()
         .ok_or_else(|| anyhow::anyhow!("config root must be a TOML table"))?;
+
+    let materialized_legacy_peer = config.legacy_device.as_ref().is_some_and(|legacy| {
+        !is_loopback_receiver_url(&legacy.url)
+            && config.devices.iter().any(|device| {
+                device.name == legacy.name
+                    && device.url == legacy.url
+                    && device.token == legacy.token
+            })
+    });
+    if materialized_legacy_peer {
+        table.remove("receiver_url");
+    }
 
     match &config.selected_device {
         Some(name) => {
@@ -927,6 +941,38 @@ receiver_url = "http://192.168.1.10:8765"
         assert_eq!(
             table.get("bind").and_then(toml::Value::as_str),
             Some("0.0.0.0:8765")
+        );
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn migrated_legacy_peer_does_not_reappear_after_removal() {
+        let path = unique_path("legacy-remove");
+        fs::write(
+            &path,
+            r#"
+receiver_url = "http://192.168.1.10:8765"
+token = "legacy-token"
+"#,
+        )
+        .expect("write config");
+
+        let selected = select_device(Some(&path), "legacy").expect("select legacy peer");
+        assert_eq!(selected, "legacy");
+        remove_peer(Some(&path), "legacy").expect("remove migrated legacy peer");
+
+        let devices = device_set(Some(&path)).expect("list devices");
+        assert_eq!(devices.devices.len(), 1);
+        assert_eq!(devices.devices[0].kind, DeviceKind::ThisDevice);
+
+        let value: toml::Value =
+            toml::from_str(&fs::read_to_string(&path).expect("read config")).expect("parse config");
+        assert!(
+            value
+                .as_table()
+                .expect("config table")
+                .get("receiver_url")
+                .is_none()
         );
         let _ = fs::remove_file(path);
     }
