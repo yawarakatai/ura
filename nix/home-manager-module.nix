@@ -56,7 +56,7 @@ in
 
         ExecStart = lib.escapeShellArgs [
           "${cfg.package}/bin/ura"
-          "serve"
+          "daemon"
           "--bind"
           cfg.bind
         ];
