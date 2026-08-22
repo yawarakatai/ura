@@ -3,6 +3,7 @@ pub mod client;
 pub mod config;
 pub mod db;
 pub mod error;
+pub mod local_api;
 pub mod mpv;
 pub mod node;
 pub mod pairing;
