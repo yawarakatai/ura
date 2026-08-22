@@ -1,5 +1,5 @@
 [Unit]
-Description=ura audio receiver
+Description=ura audio node
 After=default.target
 
 [Service]
