@@ -27,133 +27,54 @@ jobs:
           path = Path("src/node.rs")
           text = path.read_text()
 
-          def replace_once(old, new):
+          def migrate(old, new):
               global text
-              count = text.count(old)
-              if count != 1:
-                  raise SystemExit(f"expected exactly one match, got {count}: {old[:80]!r}")
-              text = text.replace(old, new, 1)
+              if old in text:
+                  text = text.replace(old, new, 1)
+              elif new not in text:
+                  raise SystemExit(f"neither old nor new form found: {old[:80]!r}")
 
-          replace_once(
+          migrate(
               "    Status { status: MpvStatus },",
               "    Status { status: Box<MpvStatus> },",
           )
-          replace_once(
+          migrate(
               "            NodeResponse::Status { status } => Ok(status),",
               "            NodeResponse::Status { status } => Ok(*status),",
           )
-          replace_once(
+          migrate(
               "            Ok(NodeResponse::Status { status })",
               "            Ok(NodeResponse::Status { status: Box::new(status) })",
           )
 
-          replace_once(
-              "    migrate_legacy_peer(&mut config);\n    if config.devices.iter().any(|device| device.name == name) {",
-              "    let migrated_legacy_peer = migrate_legacy_peer(&mut config);\n    if config.devices.iter().any(|device| device.name == name) {",
+          old = (
+              '    let table = root\n'
+              '        .as_table_mut()\n'
+              '        .ok_or_else(|| anyhow::anyhow!("config root must be a TOML table"))?;\n\n'
+              '    match &config.selected_device {'
           )
-          replace_once(
-              "    persist_device_config(config_path_override, &config)\n}\n\npub fn add_paired_peer",
-              "    persist_device_config(config_path_override, &config, migrated_legacy_peer)\n}\n\npub fn add_paired_peer",
+          new = (
+              '    let table = root\n'
+              '        .as_table_mut()\n'
+              '        .ok_or_else(|| anyhow::anyhow!("config root must be a TOML table"))?;\n\n'
+              '    let materialized_legacy_peer = config.legacy_device.as_ref().is_some_and(|legacy| {\n'
+              '        !is_loopback_receiver_url(&legacy.url)\n'
+              '            && config.devices.iter().any(|device| {\n'
+              '                device.name == legacy.name\n'
+              '                    && device.url == legacy.url\n'
+              '                    && device.token == legacy.token\n'
+              '            })\n'
+              '    });\n'
+              '    if materialized_legacy_peer {\n'
+              '        table.remove("receiver_url");\n'
+              '    }\n\n'
+              '    match &config.selected_device {'
           )
-          replace_once(
-              "    migrate_legacy_peer(&mut config);\n    if config.devices.iter().any(|device| device.name == peer_name) {",
-              "    let migrated_legacy_peer = migrate_legacy_peer(&mut config);\n    if config.devices.iter().any(|device| device.name == peer_name) {",
-          )
-          replace_once(
-              "    persist_device_config(config_path_override, &config)\n}\n\npub fn remove_peer",
-              "    persist_device_config(config_path_override, &config, migrated_legacy_peer)\n}\n\npub fn remove_peer",
-          )
-          replace_once(
-              "    persist_device_config(config_path_override, &config)\n}\n\npub fn select_device",
-              "    persist_device_config(config_path_override, &config, false)\n}\n\npub fn select_device",
-          )
+          migrate(old, new)
 
-          old_select_migration = '''    if config.devices.is_empty()
-              && config
-                  .legacy_device
-                  .as_ref()
-                  .is_some_and(|legacy| !is_loopback_receiver_url(&legacy.url))
-              {
-                  migrate_legacy_peer(&mut config);
-              }
-
-              if selecting_self {
-          '''
-          new_select_migration = '''    let migrated_legacy_peer = if config.devices.is_empty()
-              && config
-                  .legacy_device
-                  .as_ref()
-                  .is_some_and(|legacy| !is_loopback_receiver_url(&legacy.url))
-              {
-                  migrate_legacy_peer(&mut config)
-              } else {
-                  false
-              };
-
-              if selecting_self {
-          '''
-          replace_once(old_select_migration, new_select_migration)
-
-          select_persist = "persist_device_config(config_path_override, &config)?;"
-          if text.count(select_persist) != 2:
-              raise SystemExit(f"expected two select persistence calls, got {text.count(select_persist)}")
-          text = text.replace(
-              select_persist,
-              "persist_device_config(config_path_override, &config, migrated_legacy_peer)?;",
-          )
-
-          old_migrate = '''fn migrate_legacy_peer(config: &mut DeviceConfig) {
-              if !config.devices.is_empty() {
-                  return;
-              }
-              if let Some(legacy) = &config.legacy_device
-                  && !is_loopback_receiver_url(&legacy.url)
-              {
-                  config.devices.push(legacy.clone());
-              }
-          }
-          '''
-          new_migrate = '''fn migrate_legacy_peer(config: &mut DeviceConfig) -> bool {
-              if !config.devices.is_empty() {
-                  return false;
-              }
-              if let Some(legacy) = &config.legacy_device
-                  && !is_loopback_receiver_url(&legacy.url)
-              {
-                  config.devices.push(legacy.clone());
-                  return true;
-              }
-              false
-          }
-          '''
-          replace_once(old_migrate, new_migrate)
-
-          replace_once(
-              "fn persist_device_config(config_path_override: Option<&Path>, config: &DeviceConfig) -> Result<()> {",
-              '''fn persist_device_config(
-              config_path_override: Option<&Path>,
-              config: &DeviceConfig,
-              clear_legacy_receiver_url: bool,
-          ) -> Result<()> {''',
-          )
-          replace_once(
-              '''    let table = root
-                  .as_table_mut()
-                  .ok_or_else(|| anyhow::anyhow!("config root must be a TOML table"))?;
-
-              match &config.selected_device {''',
-              '''    let table = root
-                  .as_table_mut()
-                  .ok_or_else(|| anyhow::anyhow!("config root must be a TOML table"))?;
-
-              if clear_legacy_receiver_url {
-                  table.remove("receiver_url");
-              }
-
-              match &config.selected_device {''',
-          )
-
-          test = r'''
+          test_name = "fn migrated_legacy_peer_does_not_reappear_after_removal()"
+          if test_name not in text:
+              test = r'''
 
               #[test]
               fn migrated_legacy_peer_does_not_reappear_after_removal() {
@@ -189,19 +110,21 @@ jobs:
                   let _ = fs::remove_file(path);
               }
           '''
-          end = text.rfind("\n}\n")
-          if end == -1:
-              raise SystemExit("could not find test module closing brace")
-          text = text[:end] + test + text[end:]
+              end = text.rfind("\n}\n")
+              if end == -1:
+                  raise SystemExit("could not find test module closing brace")
+              text = text[:end] + test + text[end:]
 
           path.write_text(text)
           PY
           cargo fmt
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add src/node.rs
-          git commit -m "fix: preserve legacy peer removal and box status response"
-          git push origin HEAD:${{ github.head_ref }}
+          if ! git diff --quiet -- src/node.rs; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add src/node.rs
+            git commit -m "fix: harden node response and legacy peer migration"
+            git push origin HEAD:${{ github.head_ref }}
+          fi
       - name: Check formatting
         run: cargo fmt --check
       - name: Run Clippy
