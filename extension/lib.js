@@ -1,59 +1,15 @@
 (function (root) {
   "use strict";
 
-  const DEFAULT_RECEIVER_PORT = 8765;
+  const LOCAL_NODE_URL = "http://127.0.0.1:8766";
   const DEFAULT_ACTION = "play";
   const DEFAULT_LOCAL_DEVICE_NAME = "Firefox";
 
-  const LEGACY_DEFAULTS = {
-    receiverUrl: "http://127.0.0.1:8765",
-    token: "",
-  };
-
   const DEFAULT_SETTINGS = {
-    selectedDevice: "",
-    devices: [],
+    nodeToken: "",
     defaultAction: DEFAULT_ACTION,
     localDeviceName: DEFAULT_LOCAL_DEVICE_NAME,
   };
-
-  function normalizeReceiverAddress(value) {
-    const original = String(value || "").trim();
-    if (!original || /\s/.test(original)) {
-      throw new Error("Malformed receiver address.");
-    }
-    const candidate = original.includes("://") ? original : `http://${original}`;
-    let parsed;
-    try {
-      parsed = new URL(candidate);
-    } catch (_error) {
-      throw new Error("Malformed receiver address.");
-    }
-
-    if (parsed.protocol !== "http:") {
-      throw new Error("Unsupported receiver address scheme.");
-    }
-    if (parsed.username || parsed.password) {
-      throw new Error("Receiver address must not include username or password.");
-    }
-    if (parsed.pathname !== "/" || parsed.search || parsed.hash) {
-      throw new Error("Receiver address must not include a path, query, or fragment.");
-    }
-    if (!isValidHost(parsed.hostname)) {
-      throw new Error("Malformed receiver address.");
-    }
-
-    const port = parsed.port ? Number(parsed.port) : DEFAULT_RECEIVER_PORT;
-    if (!Number.isInteger(port) || port <= 0 || port > 65535) {
-      throw new Error("Malformed receiver address.");
-    }
-
-    return `http://${parsed.hostname.toLowerCase()}:${port}`;
-  }
-
-  function isValidHost(host) {
-    return Boolean(host) && /^[A-Za-z0-9.-]+$/.test(host);
-  }
 
   function normalizeAction(action) {
     return action === "enqueue" || action === "queue" ? "queue" : "play";
@@ -61,85 +17,52 @@
 
   async function loadSettings(storage) {
     const stored = await storage.local.get({
-      ...LEGACY_DEFAULTS,
       ...DEFAULT_SETTINGS,
+      receiverUrl: "",
+      token: "",
+      selectedDevice: "",
+      devices: [],
     });
-    const migrated = migrateLegacySettings(stored);
-    if (migrated) {
-      await storage.local.set(migrated);
-      return sanitizeSettings({ ...stored, ...migrated });
-    }
-    return sanitizeSettings(stored);
-  }
 
-  function migrateLegacySettings(stored) {
-    const hasDevices = Array.isArray(stored.devices) && stored.devices.length > 0;
-    if (hasDevices || !stored.receiverUrl || !stored.token) {
-      return null;
+    const migratedToken = stored.nodeToken || legacyLocalToken(stored);
+    if (migratedToken && migratedToken !== stored.nodeToken) {
+      await storage.local.set({ nodeToken: migratedToken });
     }
 
-    let url;
-    try {
-      url = normalizeReceiverAddress(stored.receiverUrl);
-    } catch (_error) {
-      return null;
-    }
-
-    const device = {
-      name: "default",
-      url,
-      token: stored.token,
-    };
     return {
-      devices: [device],
-      selectedDevice: device.name,
-      defaultAction: normalizeAction(stored.defaultAction),
-      localDeviceName: stored.localDeviceName || DEFAULT_LOCAL_DEVICE_NAME,
-    };
-  }
-
-  function sanitizeSettings(stored) {
-    const devices = uniqueDevices(Array.isArray(stored.devices) ? stored.devices : []);
-    const selectedDevice = devices.some((device) => device.name === stored.selectedDevice)
-      ? stored.selectedDevice
-      : "";
-    return {
-      selectedDevice,
-      devices,
+      nodeToken: String(migratedToken || ""),
       defaultAction: normalizeAction(stored.defaultAction),
       localDeviceName: String(stored.localDeviceName || DEFAULT_LOCAL_DEVICE_NAME),
     };
   }
 
-  function uniqueDevices(devices) {
-    const seen = new Set();
-    const result = [];
-    for (const device of devices) {
-      if (!device || typeof device !== "object") {
-        continue;
-      }
-      const name = String(device.name || "").trim();
-      const url = String(device.url || "").trim();
-      const token = String(device.token || "");
-      if (!name || !url || !token || seen.has(name)) {
-        continue;
-      }
-      seen.add(name);
-      result.push({ name, url, token });
+  function legacyLocalToken(stored) {
+    if (stored.receiverUrl && stored.token && isLoopbackUrl(stored.receiverUrl)) {
+      return String(stored.token);
     }
-    return result;
+    if (!Array.isArray(stored.devices)) {
+      return "";
+    }
+    const local = stored.devices.find(
+      (device) => device && device.token && device.url && isLoopbackUrl(device.url),
+    );
+    return local ? String(local.token) : "";
   }
 
-  function selectedDevice(settings) {
-    return settings.devices.find((device) => device.name === settings.selectedDevice) || null;
+  function isLoopbackUrl(value) {
+    try {
+      const url = new URL(value.includes("://") ? value : `http://${value}`);
+      const host = url.hostname.toLowerCase();
+      return host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]";
+    } catch (_error) {
+      return false;
+    }
   }
 
-  async function pairDevice({
+  async function connectLocalNode({
     storage,
     fetchImpl,
-    address,
     code,
-    receiverName,
     localDeviceName,
     defaultAction,
   }) {
@@ -147,23 +70,19 @@
       throw new Error("Pairing code must be exactly six decimal digits.");
     }
 
-    const url = normalizeReceiverAddress(address);
-    const settings = await loadSettings(storage);
-    const name = String(receiverName || "").trim();
     const deviceName = String(localDeviceName || "").trim();
-
-    if (!name) {
-      throw new Error("Receiver name is required.");
-    }
     if (!deviceName) {
-      throw new Error("This device name is required.");
-    }
-    await requestJson(fetchImpl, `${url}/v1/pair/info`, { method: "GET" });
-    if (settings.devices.some((device) => device.name === name)) {
-      throw new Error("Duplicate receiver name.");
+      throw new Error("Browser name is required.");
     }
 
-    const claim = await requestJson(fetchImpl, `${url}/v1/pair/claim`, {
+    let info;
+    try {
+      info = await requestJson(fetchImpl, `${LOCAL_NODE_URL}/v1/pair/info`, { method: "GET" });
+    } catch (_error) {
+      throw new Error("Local ura pairing is unavailable. Start `ura serve`, then run `ura pair`.");
+    }
+
+    const claim = await requestJson(fetchImpl, `${LOCAL_NODE_URL}/v1/pair/claim`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -173,35 +92,35 @@
     });
 
     if (!claim || claim.protocol_version !== 1 || !claim.token) {
-      throw new Error("Receiver returned an unsupported pairing response.");
+      throw new Error("Local ura node returned an unsupported pairing response.");
     }
 
-    const devices = [...settings.devices, { name, url, token: claim.token }];
     await storage.local.set({
-      devices,
-      selectedDevice: name,
-      defaultAction: normalizeAction(defaultAction || settings.defaultAction),
+      nodeToken: claim.token,
+      defaultAction: normalizeAction(defaultAction),
       localDeviceName: deviceName,
     });
 
-    return { name, url };
+    return {
+      nodeName: claim.receiver_name || info.receiver_name || "local ura",
+    };
   }
 
-  async function selectDevice(storage, name) {
+  async function loadDevices({ storage, fetchImpl }) {
     const settings = await loadSettings(storage);
-    if (!settings.devices.some((device) => device.name === name)) {
-      throw new Error("Receiver was not found.");
-    }
-    await storage.local.set({ selectedDevice: name });
-    return { ...settings, selectedDevice: name };
+    requireNodeToken(settings);
+    return authenticatedJson(fetchImpl, settings.nodeToken, "/v1/devices", { method: "GET" });
   }
 
-  async function removeDevice(storage, name) {
+  async function selectDevice({ storage, fetchImpl, name }) {
     const settings = await loadSettings(storage);
-    const devices = settings.devices.filter((device) => device.name !== name);
-    const selectedDevice = settings.selectedDevice === name ? "" : settings.selectedDevice;
-    await storage.local.set({ devices, selectedDevice });
-    return { ...settings, devices, selectedDevice };
+    requireNodeToken(settings);
+    const result = await authenticatedJson(fetchImpl, settings.nodeToken, "/v1/select", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+    return result.selected;
   }
 
   async function setDefaultAction(storage, action) {
@@ -212,37 +131,58 @@
 
   async function sendTabToSelectedDevice({ storage, fetchImpl, tabUrl }) {
     const settings = await loadSettings(storage);
-    const device = selectedDevice(settings);
-    if (!device) {
-      throw new Error("No receiver selected. Open ura extension options and pair or select a receiver.");
-    }
+    requireNodeToken(settings);
     if (!tabUrl) {
       throw new Error("Current tab has no URL.");
     }
 
+    const devices = await authenticatedJson(
+      fetchImpl,
+      settings.nodeToken,
+      "/v1/devices",
+      { method: "GET" },
+    );
     const action = settings.defaultAction === "queue" ? "enqueue" : "play";
-    let response;
+    await authenticatedJson(fetchImpl, settings.nodeToken, `/v1/${action}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        url: tabUrl,
+        source: "browser-extension",
+      }),
+    });
+
+    return {
+      action,
+      deviceName: devices.selected || "selected device",
+    };
+  }
+
+  function requireNodeToken(settings) {
+    if (!settings.nodeToken) {
+      throw new Error("Firefox is not connected to the local ura node. Open ura extension options first.");
+    }
+  }
+
+  async function authenticatedJson(fetchImpl, token, path, options) {
+    const headers = {
+      ...(options.headers || {}),
+      Authorization: `Bearer ${token}`,
+    };
     try {
-      response = await fetchImpl(`${trimTrailingSlash(device.url)}/v1/${action}`, {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${device.token}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          url: tabUrl,
-          source: "browser-extension",
-        }),
+      return await requestJson(fetchImpl, `${LOCAL_NODE_URL}${path}`, {
+        ...options,
+        headers,
       });
-    } catch (_error) {
-      throw new Error("Receiver unreachable.");
+    } catch (error) {
+      if (error && error.status === 401) {
+        throw new Error("Firefox is no longer authorized by the local ura node. Pair it again from options.");
+      }
+      if (error && error.networkError) {
+        throw new Error("Local ura node is unreachable. Start `ura serve` or the ura user service.");
+      }
+      throw error;
     }
-
-    if (!response.ok) {
-      throw new Error(await responseErrorMessage(response));
-    }
-
-    return { action, deviceName: device.name };
   }
 
   async function requestJson(fetchImpl, url, options) {
@@ -250,35 +190,30 @@
     try {
       response = await fetchImpl(url, options);
     } catch (_error) {
-      throw new Error("Receiver unreachable.");
+      const error = new Error("Local ura node is unreachable.");
+      error.networkError = true;
+      throw error;
     }
     if (!response.ok) {
-      throw new Error(await responseErrorMessage(response));
+      const error = new Error(await responseErrorMessage(response));
+      error.status = response.status;
+      throw error;
     }
     return response.json();
   }
 
   async function responseErrorMessage(response) {
     const errorCode = await readErrorCode(response);
-    if (errorCode === "pairing_not_active") {
-      return "Pairing is inactive or expired.";
-    }
     if (errorCode === "invalid_pairing_code") {
       return "Invalid pairing code.";
     }
-    if (errorCode === "pairing_attempts_exhausted") {
-      return "Pairing expired.";
-    }
     if (errorCode === "device_name_exists") {
-      return "This device name is already authorized on the receiver.";
+      return "This browser name is already authorized by ura.";
     }
     if (response.status === 401) {
       return "Unauthorized request.";
     }
-    if (response.status === 403) {
-      return "Pairing is inactive or expired.";
-    }
-    return `Receiver returned HTTP ${response.status}.`;
+    return errorCode || `Local ura node returned HTTP ${response.status}.`;
   }
 
   async function readErrorCode(response) {
@@ -290,30 +225,16 @@
     }
   }
 
-  function trimTrailingSlash(value) {
-    return value.replace(/\/+$/, "");
-  }
-
-  function displayHost(url) {
-    try {
-      return new URL(url).host;
-    } catch (_error) {
-      return url;
-    }
-  }
-
   const exported = {
-    DEFAULT_RECEIVER_PORT,
+    LOCAL_NODE_URL,
     DEFAULT_SETTINGS,
-    normalizeReceiverAddress,
     loadSettings,
-    migrateLegacySettings,
-    pairDevice,
+    legacyLocalToken,
+    connectLocalNode,
+    loadDevices,
     selectDevice,
-    removeDevice,
     setDefaultAction,
     sendTabToSelectedDevice,
-    displayHost,
   };
 
   root.UraExtension = exported;
