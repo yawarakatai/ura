@@ -6,102 +6,16 @@ on:
   pull_request:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.head_ref || github.ref_name }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: Apply final terminology polish
-        if: github.ref_name == 'feat/node-destinations' || github.head_ref == 'feat/node-destinations'
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-
-          def edit(pathname, replacements):
-              path = Path(pathname)
-              text = path.read_text()
-              for old, new in replacements:
-                  text = text.replace(old, new)
-              path.write_text(text)
-
-          edit("src/config.rs", [
-              ("receiver_alias", "peer_alias"),
-              ("receiver address must not be empty", "peer address must not be empty"),
-              ("unsupported receiver address scheme", "unsupported peer address scheme"),
-              ("receiver address must not include", "peer address must not include"),
-              ("receiver address host", "peer address host"),
-              ("receiver_reads_token_and_bind_from_config_file", "node_reads_token_and_bind_from_config_file"),
-              ("receiver_defaults_bind_when_config_omits_it", "node_defaults_bind_when_config_omits_it"),
-              ("receiver_can_omit_legacy_token", "node_can_omit_legacy_token"),
-              ("env_overrides_receiver_config_file", "env_overrides_node_config_file"),
-              ("cli_overrides_env_and_receiver_config_file", "cli_overrides_env_and_node_config_file"),
-              ("load receiver config", "load node config"),
-              ("receive_can_load_token_without_peer_url", "node_can_load_legacy_token_without_peer_url"),
-              ("load receiver token", "load peer API token"),
-              ("token_generate_produces_valid_receiver_token", "token_generate_produces_valid_peer_api_token"),
-              ("normalizes_receiver_addresses", "normalizes_peer_addresses"),
-              ("rejects_invalid_receiver_addresses", "rejects_invalid_peer_addresses"),
-          ])
-
-          edit("src/db.rs", [
-              ("validate_device_name", "validate_client_name"),
-              ("failed to authorize device", "failed to authorize client"),
-              ("failed to revoke device", "failed to revoke client"),
-              ("failed to read authorized devices", "failed to read authorized clients"),
-              ("failed to update authorized device last_seen_at", "failed to update authorized client last_seen_at"),
-              ("device name must not be empty", "client name must not be empty"),
-          ])
-
-          edit("src/peer_api.rs", [
-              ("duplicate authorized device", "duplicate authorized client"),
-              ("duplicate authorized client", "duplicate authorized client"),
-              ("authorized device", "authorized client"),
-              ("bind test receiver", "bind test peer"),
-              ("test receiver", "test peer"),
-              ("receiver socket", "peer socket"),
-          ])
-
-          edit("docs/architecture.md", [
-              ("authorized-device", "authorized-client"),
-              ("legacy configured receiver token", "legacy configured peer API token"),
-              ("receiver backend", "local playback backend"),
-          ])
-          edit("docs/deployment.md", [
-              ("authorized-device credential", "authorized-client credential"),
-              ("Authorized devices are stored", "Authorized clients are stored"),
-              ("authorized-device credentials", "authorized-client credentials"),
-          ])
-          edit("docs/pairing-auth.md", [
-              ("authorized-device", "authorized-client"),
-              ("Old remote-receiver tokens", "Old remote peer tokens"),
-              ("legacy configured receiver token", "legacy configured peer API token"),
-              ("legacy receiver token", "legacy peer API token"),
-          ])
-          edit("docs/development.md", [
-              ("authorized-device", "authorized-client"),
-              ("receiver token", "peer API token"),
-          ])
-          edit("AGENTS.md", [
-              ("authorized-device", "authorized-client"),
-              ("receiver token", "peer API token"),
-          ])
-          PY
-
-          cargo fmt
-          git add -A
-          if ! git diff --cached --quiet; then
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git commit -m "refactor: remove leftover role terminology"
-            git push origin HEAD:${{ github.head_ref || github.ref_name }}
-          fi
       - name: Check formatting
         run: cargo fmt --check
       - name: Run Clippy
