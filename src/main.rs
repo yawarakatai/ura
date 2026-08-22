@@ -30,47 +30,47 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Serve { bind } => {
+        Command::Daemon { bind } => {
             init_daemon_logging();
             let config_path = cli.config.clone();
             let config = NodeConfig::load_with_overrides(cli.config, bind, cli.token)?;
             run_node(config.bind, config.token, config_path).await
         }
         Command::Play { to, url } => {
-            let client = playback_client_for(cli.config, cli.receiver_url, cli.token, to)?;
+            let client = playback_client_for(cli.config, cli.peer_url, cli.token, to)?;
             client.play(&url)?;
             println!("play: sent {url}");
             Ok(())
         }
         Command::Queue { to, url } => {
-            let client = playback_client_for(cli.config, cli.receiver_url, cli.token, to)?;
+            let client = playback_client_for(cli.config, cli.peer_url, cli.token, to)?;
             client.queue(&url)?;
             println!("queue: sent {url}");
             Ok(())
         }
         Command::Pause { to } => {
-            playback_client_for(cli.config, cli.receiver_url, cli.token, to)?.control("pause")?;
+            playback_client_for(cli.config, cli.peer_url, cli.token, to)?.control("pause")?;
             println!("pause: sent");
             Ok(())
         }
         Command::Resume { to } => {
-            playback_client_for(cli.config, cli.receiver_url, cli.token, to)?.control("resume")?;
+            playback_client_for(cli.config, cli.peer_url, cli.token, to)?.control("resume")?;
             println!("resume: sent");
             Ok(())
         }
         Command::Toggle { to } => {
-            playback_client_for(cli.config, cli.receiver_url, cli.token, to)?.control("toggle")?;
+            playback_client_for(cli.config, cli.peer_url, cli.token, to)?.control("toggle")?;
             println!("toggle: sent");
             Ok(())
         }
         Command::Stop { to } => {
-            playback_client_for(cli.config, cli.receiver_url, cli.token, to)?.control("stop")?;
+            playback_client_for(cli.config, cli.peer_url, cli.token, to)?.control("stop")?;
             println!("stop: sent");
             Ok(())
         }
         Command::Loop { to, command } => {
             let to = command_to_device(&to, &command);
-            let client = playback_client_for(cli.config, cli.receiver_url, cli.token, to)?;
+            let client = playback_client_for(cli.config, cli.peer_url, cli.token, to)?;
             match command {
                 None => {
                     if client.loop_status()? == LoopStatus::One {
@@ -102,7 +102,7 @@ async fn main() -> Result<()> {
         Command::Pair {
             address,
             code,
-            device_name,
+            node_name,
             name,
             select,
             no_select,
@@ -111,7 +111,7 @@ async fn main() -> Result<()> {
                 cli.config.as_deref(),
                 &address,
                 code,
-                device_name,
+                node_name,
                 name,
                 select,
                 no_select,
@@ -173,12 +173,12 @@ async fn main() -> Result<()> {
         Command::Config { command } => match command {
             ConfigCommand::Init {
                 force,
-                receiver_url,
+                peer_url,
                 bind,
             } => {
                 let path = Config::init(ConfigInit {
                     config_path: cli.config,
-                    receiver_url,
+                    receiver_url: peer_url,
                     bind,
                     token: cli.token,
                     force,
@@ -195,14 +195,13 @@ async fn main() -> Result<()> {
             }
         },
         Command::Status { to } => {
-            let status =
-                playback_client_for(cli.config, cli.receiver_url, cli.token, to)?.status()?;
+            let status = playback_client_for(cli.config, cli.peer_url, cli.token, to)?.status()?;
             print_status(&status);
             Ok(())
         }
         Command::History { to } => {
             let history =
-                playback_client_for(cli.config, cli.receiver_url, cli.token, to)?.history()?;
+                playback_client_for(cli.config, cli.peer_url, cli.token, to)?.history()?;
             print_history(&history);
             Ok(())
         }
@@ -389,7 +388,7 @@ fn pair_peer(
     config_path: Option<&std::path::Path>,
     address: &str,
     code: Option<String>,
-    device_name: Option<String>,
+    node_name: Option<String>,
     name: Option<String>,
     select: bool,
     no_select: bool,
@@ -403,7 +402,7 @@ fn pair_peer(
         .local_name
         .clone()
         .unwrap_or_else(default_device_name);
-    let default_peer_alias = info.receiver_name.clone();
+    let default_peer_alias = info.node_name.clone();
 
     let code = match code {
         Some(code) => code,
@@ -414,7 +413,7 @@ fn pair_peer(
         anyhow::bail!("pairing code must be six decimal digits");
     }
 
-    let local_name = match device_name {
+    let local_name = match node_name {
         Some(name) => name,
         None if existing_config.local_name.is_some() => default_local_name.clone(),
         None if tty => prompt("this device name", Some(&default_local_name))?,

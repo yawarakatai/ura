@@ -29,7 +29,7 @@ use crate::{
     db::HistoryEntry,
     local_api::run_local_api,
     mpv::{LoopStatus, MpvStatus},
-    receiver::run_peer_api,
+    peer_api::run_peer_api,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]

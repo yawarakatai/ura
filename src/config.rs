@@ -546,7 +546,7 @@ fn validate_host(host: &str) -> Result<()> {
             .chars()
             .any(|ch| !(ch.is_ascii_alphanumeric() || ch == '.' || ch == '-'))
     {
-        anyhow::bail!("invalid receiver address host");
+        anyhow::bail!("invalid peer address host");
     }
     Ok(())
 }

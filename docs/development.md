@@ -44,7 +44,7 @@ terminals:
 ```bash
 # terminal A
 nix develop
-cargo run -- serve
+cargo run -- daemon
 ```
 
 ```bash
@@ -110,7 +110,7 @@ cover:
 
 ## Firefox Temporary Extension Test
 
-1. Start the local node with `cargo run -- serve` or the installed user service.
+1. Start the local node with `cargo run -- daemon` or the installed user service.
 2. Open Firefox and go to `about:debugging#/runtime/this-firefox`.
 3. Choose "Load Temporary Add-on" and select `extension/manifest.json`.
 4. Run `cargo run -- pair` and keep the six-digit code visible.
@@ -158,7 +158,7 @@ show useful metadata and never print literal `null` for missing display values.
 `ura=info`.
 
 ```bash
-RUST_LOG=ura=debug cargo run -- serve
+RUST_LOG=ura=debug cargo run -- daemon
 RUST_LOG=ura=info ura daemon
 ```
 

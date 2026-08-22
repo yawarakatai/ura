@@ -148,7 +148,7 @@ async fn run_api(
     database: Arc<Database>,
     playback_state: SharedPlaybackState,
     pairing: Arc<PairingManager>,
-    shutdown: oneshot::PlaybackRuntime<()>,
+    shutdown: oneshot::Receiver<()>,
 ) -> AnyhowResult<()> {
     let state = AppState {
         legacy_token: token.map(Arc::from),
@@ -175,7 +175,7 @@ async fn run_control_socket(
     socket_path: PathBuf,
     bind: SocketAddr,
     pairing: Arc<PairingManager>,
-    mut shutdown: oneshot::PlaybackRuntime<()>,
+    mut shutdown: oneshot::Receiver<()>,
 ) -> AnyhowResult<()> {
     prepare_control_socket_path(&socket_path)?;
     let listener = UnixListener::bind(&socket_path)
@@ -734,7 +734,7 @@ pub fn validate_peer_token(token: &str) -> AnyhowResult<()> {
     }
     if token == "change-me" {
         return Err(anyhow::anyhow!(
-            "peer API token must be changed before starting the receiver"
+            "peer API token must be changed before starting the node"
         ));
     }
     if token.len() < 32 {
@@ -1000,7 +1000,7 @@ fn sanitize_video_id(value: &str) -> Option<String> {
 
 async fn supervise_mpv_child(
     mut mpv: Child,
-    mut shutdown: oneshot::PlaybackRuntime<()>,
+    mut shutdown: oneshot::Receiver<()>,
 ) -> AnyhowResult<ExitStatus> {
     tokio::select! {
         result = mpv.wait() => {

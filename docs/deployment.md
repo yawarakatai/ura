@@ -234,7 +234,7 @@ systemctl --user start ura.service
 During repository development, start it in another terminal with:
 
 ```bash
-cargo run -- serve
+cargo run -- daemon
 ```
 
 If ura reports that an mpv or ura runtime socket is already in use, stop the

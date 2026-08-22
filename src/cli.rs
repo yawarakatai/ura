@@ -13,7 +13,7 @@ pub struct Cli {
     pub config: Option<PathBuf>,
 
     #[arg(long = "peer-url", alias = "receiver-url", global = true)]
-    pub receiver_url: Option<String>,
+    pub peer_url: Option<String>,
 
     #[arg(long, global = true)]
     pub token: Option<String>,
@@ -25,8 +25,8 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Run the long-running local ura node.
-    #[command(name = "daemon", alias = "serve")]
-    Serve {
+    #[command(alias = "serve")]
+    Daemon {
         /// Address for the peer HTTP API to bind.
         #[arg(long)]
         bind: Option<SocketAddr>,
@@ -80,8 +80,8 @@ pub enum Command {
         #[arg(long)]
         code: Option<String>,
         /// This node's name stored on the peer.
-        #[arg(long)]
-        device_name: Option<String>,
+        #[arg(long = "node-name", alias = "device-name")]
+        node_name: Option<String>,
         /// Local alias for the peer being added.
         #[arg(long)]
         name: Option<String>,
@@ -157,7 +157,7 @@ pub enum ConfigCommand {
             alias = "receiver-url",
             default_value = "http://127.0.0.1:8765"
         )]
-        receiver_url: String,
+        peer_url: String,
 
         /// Peer API bind address to write into config.toml for `ura daemon`.
         #[arg(long, default_value = "127.0.0.1:8765")]
