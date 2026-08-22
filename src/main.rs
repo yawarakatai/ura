@@ -18,8 +18,8 @@ use ura::{
     db::{Database, HistoryEntry, authorize_device},
     mpv::{LoopStatus, MpvStatus},
     node::{
-        Destination, DeviceKind, DeviceSet, NodeClient, device_set, resolve_destination, run_node,
-        select_device,
+        Destination, DeviceKind, DeviceSet, NodeClient, add_paired_peer, add_peer, device_set,
+        remove_peer, resolve_destination, run_node, select_device,
     },
     pairing::{PairingCompletion, PairingStatus, valid_pairing_code},
     selector,
@@ -130,14 +130,7 @@ async fn main() -> Result<()> {
                 address,
                 token,
             } => {
-                if current_devices(cli.config.as_deref())?
-                    .devices
-                    .iter()
-                    .any(|device| device.kind == DeviceKind::ThisDevice && device.name == name)
-                {
-                    anyhow::bail!("device name `{name}` conflicts with this device");
-                }
-                DeviceConfig::add(cli.config.as_deref(), &name, &address, &token)?;
+                add_peer(cli.config.as_deref(), &name, &address, &token)?;
                 println!("device added: {name}");
                 Ok(())
             }
@@ -152,7 +145,7 @@ async fn main() -> Result<()> {
                 Ok(())
             }
             DeviceCommand::Remove { name } => {
-                DeviceConfig::remove(cli.config.as_deref(), &name)?;
+                remove_peer(cli.config.as_deref(), &name)?;
                 println!("device removed: {name}");
                 Ok(())
             }
@@ -284,7 +277,7 @@ fn controller_for(
         )?));
     }
 
-    if NodeClient::is_available() {
+    if config_path.is_none() && NodeClient::is_available() {
         return Ok(ControllerClient::Node {
             client: NodeClient::new()?,
             to,
@@ -461,7 +454,7 @@ fn pair_controller(
         );
     }
 
-    match DeviceConfig::add_paired(
+    match add_paired_peer(
         config_path,
         &peer_alias,
         &normalized_address,
@@ -559,7 +552,8 @@ enum PairControlResponse {
         completion: PairingCompletion,
     },
     Ok {
-        ok: bool,
+        #[serde(rename = "ok")]
+        _ok: bool,
     },
     Error {
         error: String,
@@ -613,6 +607,12 @@ fn print_status(status: &MpvStatus) {
     if let Some(loop_status) = &status.loop_status {
         println!("loop:    {}", format_loop_status(loop_status));
     }
+    if status.title.is_none()
+        && status.media_title.is_none()
+        && let Some(source_url) = &status.source_url
+    {
+        println!("source:  {}", shorten_source(source_url));
+    }
 }
 
 fn print_history(history: &[HistoryEntry]) {
@@ -633,40 +633,49 @@ fn print_history(history: &[HistoryEntry]) {
 }
 
 fn print_devices(devices: &DeviceSet, authorized: &[ura::db::AuthorizedDevice]) {
-    println!("Selected device: {}", devices.selected);
-    println!();
-    println!("Devices:");
-    println!("  {:<2} {:<18} {:<12} ADDRESS", "", "NAME", "TYPE");
+    print!("{}", render_devices(devices, authorized));
+}
+
+fn render_devices(devices: &DeviceSet, authorized: &[ura::db::AuthorizedDevice]) -> String {
+    let mut output = String::new();
+    output.push_str(&format!("Selected device: {}\n\n", devices.selected));
+    output.push_str("Devices:\n");
+    output.push_str(&format!("  {:<2} {:<18} {:<12} ADDRESS\n", "", "NAME", "TYPE"));
     for device in &devices.devices {
-        let marker = if device.name == devices.selected { "*" } else { " " };
+        let marker = if device.name == devices.selected {
+            "*"
+        } else {
+            " "
+        };
         let kind = match &device.kind {
             DeviceKind::ThisDevice => "this device",
             DeviceKind::Peer => "peer",
         };
-        println!(
-            "  {:<2} {:<18} {:<12} {}",
+        output.push_str(&format!(
+            "  {:<2} {:<18} {:<12} {}\n",
             marker,
             device.name,
             kind,
             device.address.as_deref().unwrap_or("-")
-        );
+        ));
     }
 
-    println!();
-    println!("Authorized controllers:");
+    output.push('\n');
+    output.push_str("Authorized controllers:\n");
     if authorized.is_empty() {
-        println!("  none");
+        output.push_str("  none\n");
     } else {
-        println!("  {:<18} {:<16} LAST SEEN", "NAME", "CREATED");
+        output.push_str(&format!("  {:<18} {:<16} LAST SEEN\n", "NAME", "CREATED"));
         for device in authorized {
-            println!(
-                "  {:<18} {:<16} {}",
+            output.push_str(&format!(
+                "  {:<18} {:<16} {}\n",
                 device.name,
                 device.created_at,
                 device.last_seen_at.as_deref().unwrap_or("never")
-            );
+            ));
         }
     }
+    output
 }
 
 fn display_title(status: &MpvStatus) -> String {
@@ -718,6 +727,16 @@ fn format_loop_status(status: &LoopStatus) -> &'static str {
     }
 }
 
+fn shorten_source(source: &str) -> String {
+    source
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(source)
+        .chars()
+        .take(48)
+        .collect()
+}
+
 fn truncate(value: &str, width: usize) -> String {
     if value.chars().count() <= width {
         return value.to_string();
@@ -727,6 +746,87 @@ fn truncate(value: &str, width: usize) -> String {
     }
     let prefix = value.chars().take(width - 3).collect::<String>();
     format!("{prefix}...")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn formats_duration_without_null_or_zero_for_missing_values() {
+        assert_eq!(format_duration(None), "unknown");
+        assert_eq!(format_duration(Some(222.5)), "3:43");
+        assert_eq!(format_duration(Some(3798.0)), "1:03:18");
+    }
+
+    #[test]
+    fn status_title_uses_unknown_instead_of_source_url() {
+        let status = MpvStatus {
+            pause: Some(false),
+            idle_active: Some(false),
+            path: None,
+            media_title: Some("https://youtu.be/example".to_string()),
+            title: None,
+            artist: None,
+            uploader: None,
+            album: None,
+            duration_seconds: None,
+            position_seconds: None,
+            playlist_pos: None,
+            playlist_count: None,
+            source_url: Some("https://youtu.be/example".to_string()),
+            playback_path: None,
+            loop_status: Some(LoopStatus::Off),
+        };
+
+        assert_eq!(display_title(&status), "Unknown title");
+    }
+
+    #[test]
+    fn truncate_uses_ascii_suffix() {
+        assert_eq!(truncate("abcdef", 6), "abcdef");
+        assert_eq!(truncate("abcdef", 5), "ab...");
+        assert_eq!(truncate("abcdef", 3), "...");
+        assert_eq!(truncate("abcdef", 2), "..");
+    }
+
+    #[test]
+    fn truncate_counts_unicode_characters() {
+        assert_eq!(truncate("あいうえお", 4), "あ...");
+        assert_eq!(truncate("あいう", 3), "あいう");
+    }
+
+    #[test]
+    fn device_list_rendering_hides_token_material() {
+        let devices = DeviceSet {
+            selected: "kamo".to_string(),
+            devices: vec![
+                ura::node::DeviceSummary {
+                    name: "desktop".to_string(),
+                    kind: DeviceKind::ThisDevice,
+                    address: None,
+                },
+                ura::node::DeviceSummary {
+                    name: "kamo".to_string(),
+                    kind: DeviceKind::Peer,
+                    address: Some("http://kamo:8765".to_string()),
+                },
+            ],
+        };
+        let authorized = vec![ura::db::AuthorizedDevice {
+            name: "firefox".to_string(),
+            created_at: "2026-07-10 17:35".to_string(),
+            last_seen_at: None,
+            revoked_at: None,
+        }];
+
+        let output = render_devices(&devices, &authorized);
+
+        assert!(output.contains("kamo"));
+        assert!(output.contains("firefox"));
+        assert!(!output.contains("secret-token"));
+        assert!(!output.contains("token_hash"));
+    }
 }
 
 fn init_serve_logging() {
