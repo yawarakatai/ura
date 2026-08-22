@@ -20,7 +20,7 @@ Firefox / ura CLI
    mpv             ura node → mpv
 ```
 
-There is no sender-only or receiver-only role. This device is always available as a playback destination; remote devices become available after pairing.
+Nodes do not have fixed roles. This device is always available as a playback destination; remote devices become available after pairing.
 
 No web dashboard. No account. No streaming service integration.
 Just choose a device and play something.
