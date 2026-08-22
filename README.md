@@ -44,10 +44,10 @@ With `ura`, all of those are the same operation: select a playback device.
 
 ## Quick start
 
-Start the local node:
+Start the local node daemon:
 
 ```console
-$ ura serve
+$ ura daemon
 ```
 
 With no paired peers, this device is selected automatically:
@@ -65,14 +65,14 @@ $ ura play "https://youtu.be/..."
 
 The URL plays through this machine's `mpv` instance.
 
-When installed through the Home Manager module, the user service starts the node for you, so normal use does not require running `ura serve` manually.
+When installed through the Home Manager module, the user service starts the node for you, so normal use does not require running `ura daemon` manually.
 
 ## Pair another device
 
 On the other Linux machine, expose its peer API and open pairing:
 
 ```console
-$ ura serve --bind 0.0.0.0:8765
+$ ura daemon --bind 0.0.0.0:8765
 $ ura pair
 ```
 
@@ -142,4 +142,4 @@ Firefox follows the same rule: it submits commands to the local node rather than
 
 ## Current compatibility
 
-The existing peer pairing protocol, bearer-token authentication, HTTP peer API, history database, and legacy direct receiver overrides are still supported while the node model is introduced. Existing remote-only controller configurations continue to work when no local `ura` node is running.
+The existing peer pairing protocol, bearer-token authentication, HTTP peer API, history database, and legacy direct `receiver_url` / `--receiver-url` aliases are still supported while the node model is introduced. Existing remote-only client configurations continue to work when no local `ura` node is running.
