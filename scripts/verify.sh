@@ -9,8 +9,8 @@ for tool in mpv node yt-dlp sqlite3; do
 done
 
 cargo fmt --check
-cargo clippy -- -D warnings
-cargo test
-cargo check --all-targets
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked
+cargo check --locked --all-targets
 node --test extension/lib.test.js
 nix flake check
