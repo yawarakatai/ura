@@ -18,118 +18,26 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: Apply reviewed fixes
+      - name: Move logging initialization before tests
         if: github.event_name == 'pull_request'
         run: |
           python3 - <<'PY'
           from pathlib import Path
 
-          path = Path("src/node.rs")
+          path = Path("src/main.rs")
           text = path.read_text()
-
-          def migrate(old, new):
-              global text
-              if old in text:
-                  text = text.replace(old, new, 1)
-              elif new not in text:
-                  raise SystemExit(f"neither old nor new form found: {old[:80]!r}")
-
-          migrate(
-              "    Status { status: MpvStatus },",
-              "    Status { status: Box<MpvStatus> },",
-          )
-          migrate(
-              "            NodeResponse::Status { status } => Ok(status),",
-              "            NodeResponse::Status { status } => Ok(*status),",
-          )
-          migrate(
-              "            Ok(NodeResponse::Status { status })",
-              "            Ok(NodeResponse::Status { status: Box::new(status) })",
-          )
-
-          old = (
-              '    let table = root\n'
-              '        .as_table_mut()\n'
-              '        .ok_or_else(|| anyhow::anyhow!("config root must be a TOML table"))?;\n\n'
-              '    match &config.selected_device {'
-          )
-          new = (
-              '    let table = root\n'
-              '        .as_table_mut()\n'
-              '        .ok_or_else(|| anyhow::anyhow!("config root must be a TOML table"))?;\n\n'
-              '    let materialized_legacy_peer = config.legacy_device.as_ref().is_some_and(|legacy| {\n'
-              '        !is_loopback_receiver_url(&legacy.url)\n'
-              '            && config.devices.iter().any(|device| {\n'
-              '                device.name == legacy.name\n'
-              '                    && device.url == legacy.url\n'
-              '                    && device.token == legacy.token\n'
-              '            })\n'
-              '    });\n'
-              '    if materialized_legacy_peer {\n'
-              '        table.remove("receiver_url");\n'
-              '    }\n\n'
-              '    match &config.selected_device {'
-          )
-          migrate(old, new)
-
-          test_name = "fn migrated_legacy_peer_does_not_reappear_after_removal()"
-          if test_name not in text:
-              test = r'''
-
-              #[test]
-              fn migrated_legacy_peer_does_not_reappear_after_removal() {
-                  let path = unique_path("legacy-remove");
-                  fs::write(
-                      &path,
-                      r#"
-          receiver_url = "http://192.168.1.10:8765"
-          token = "legacy-token"
-          "#,
-                  )
-                  .expect("write config");
-
-                  let selected = select_device(Some(&path), "legacy").expect("select legacy peer");
-                  assert_eq!(selected, "legacy");
-                  remove_peer(Some(&path), "legacy").expect("remove migrated legacy peer");
-
-                  let devices = device_set(Some(&path)).expect("list devices");
-                  assert_eq!(devices.devices.len(), 1);
-                  assert_eq!(devices.devices[0].kind, DeviceKind::ThisDevice);
-
-                  let value: toml::Value = toml::from_str(
-                      &fs::read_to_string(&path).expect("read config"),
-                  )
-                  .expect("parse config");
-                  assert!(
-                      value
-                          .as_table()
-                          .expect("config table")
-                          .get("receiver_url")
-                          .is_none()
-                  );
-                  let _ = fs::remove_file(path);
-              }
-          '''
-              end = text.rfind("\n}\n")
-              if end == -1:
-                  raise SystemExit("could not find test module closing brace")
-              text = text[:end] + test + text[end:]
-
-          path.write_text(text)
-
-          main_path = Path("src/main.rs")
-          main = main_path.read_text()
           test_marker = "#[cfg(test)]\nmod tests {"
           logging_marker = "fn init_serve_logging() {"
-          test_pos = main.find(test_marker)
-          logging_pos = main.find(logging_marker)
+          test_pos = text.find(test_marker)
+          logging_pos = text.find(logging_marker)
           if test_pos == -1 or logging_pos == -1:
               raise SystemExit("could not locate main test/logging sections")
+
           if logging_pos > test_pos:
-              prefix = main[:logging_pos].rstrip()
-              logging_fn = main[logging_pos:].strip()
+              prefix = text[:logging_pos].rstrip()
+              logging_fn = text[logging_pos:].strip()
               test_pos = prefix.find(test_marker)
-              main = (
+              text = (
                   prefix[:test_pos].rstrip()
                   + "\n\n"
                   + logging_fn
@@ -137,14 +45,14 @@ jobs:
                   + prefix[test_pos:].lstrip()
                   + "\n"
               )
-              main_path.write_text(main)
+              path.write_text(text)
           PY
           cargo fmt
-          if ! git diff --quiet -- src/node.rs src/main.rs; then
+          if ! git diff --quiet -- src/main.rs; then
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add src/node.rs src/main.rs
-            git commit -m "fix: satisfy strict node clippy checks"
+            git add src/main.rs
+            git commit -m "fix: move logging initialization before tests"
             git push origin HEAD:${{ github.head_ref }}
           fi
       - name: Check formatting
