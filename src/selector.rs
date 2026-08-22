@@ -141,11 +141,7 @@ fn render(
             };
             match &device.kind {
                 DeviceKind::ThisDevice => {
-                    writeln!(
-                        tty,
-                        "{pointer} {:<18} This device{current}",
-                        device.name
-                    )?;
+                    writeln!(tty, "{pointer} {:<18} This device{current}", device.name)?;
                 }
                 DeviceKind::Peer => {
                     writeln!(
