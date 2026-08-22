@@ -3,8 +3,8 @@
 Status: Current `0.3.0` behavior.
 
 `ura` is a small Linux audio node. Each machine can play audio itself and can
-route local commands to a paired peer. There is no sender-only or receiver-only
-role in the user-facing model.
+route local commands to a paired peer. Nodes do not have fixed sending or
+receiving roles in the user-facing model.
 
 ```text
 Firefox / ura CLI
@@ -72,8 +72,9 @@ address, and bearer token. Internally the selected destination resolves to
 `Destination::SelfNode` or `Destination::Peer`.
 
 When no remote device is selected, this device is the default destination.
-Legacy flat `receiver_url` pointing at loopback is treated as this device rather
-than being shown as a duplicate peer.
+The legacy flat `receiver_url` key is still accepted for `0.2.x` configuration
+compatibility. A loopback value is treated as this device rather than being
+shown as a duplicate peer.
 
 ## CLI
 
@@ -168,7 +169,8 @@ POST /v1/pair/claim
 ```
 
 They proxy the already-running node's pairing session; they do not create a new
-pairing mechanism or expose a way to start pairing over HTTP.
+pairing mechanism or expose a way to start pairing over HTTP. Because this
+loopback API is new in `0.3.0`, its pairing responses use `node_name` directly.
 
 The Firefox manifest host permission is restricted to localhost.
 
@@ -219,10 +221,13 @@ There is no network endpoint that can start pairing.
 returned credential as a peer.
 
 The current network pairing protocol is version 1 and remains asymmetric at the
-credential level: the controlling node stores a plaintext bearer token for the
-peer, while the receiving node stores only its hash. A future protocol can make
-peer identity/trust symmetric without changing the routing invariant described
-above.
+credential level: the initiating node stores a plaintext bearer token for the
+peer, while the paired node stores only its hash. Pairing protocol v1 keeps the
+wire field name `receiver_name` for compatibility; Rust internals and the local
+browser API call the same value `node_name`.
+
+A future protocol can make peer identity/trust symmetric without changing the
+routing invariant described above.
 
 ## mpv JSON IPC
 
@@ -260,9 +265,11 @@ fallback: ~/.local/share/ura/ura.db
 ```
 
 Playback history uses `tracks` and `plays` tables. Authorized local/peer clients
-are stored in `authorized_devices` using SHA-256 token hashes, creation time,
-coarse `last_seen_at`, and optional revocation time. Plaintext issued tokens are
-not stored by the node that authorizes them.
+are stored in the existing `authorized_devices` table using SHA-256 token hashes,
+creation time, coarse `last_seen_at`, and optional revocation time. The table
+name is retained as an on-disk schema compatibility detail; the Rust API calls
+these records authorized clients. Plaintext issued tokens are not stored by the
+node that authorizes them.
 
 ## XDG Paths
 
@@ -280,45 +287,3 @@ runtime:
   $XDG_RUNTIME_DIR/ura/control.sock
   $XDG_RUNTIME_DIR/ura/node.sock
 ```
-
-`XDG_RUNTIME_DIR` is required for local runtime sockets.
-
-## Configuration
-
-Example node configuration with one peer:
-
-```toml
-bind = "127.0.0.1:8765"
-selected_device = "living-room"
-
-[local]
-name = "desktop"
-
-[[devices]]
-name = "living-room"
-url = "http://192.168.1.23:8765"
-token = "..."
-```
-
-Selecting this device removes the persisted remote `selected_device`; self is
-implicit rather than serialized as another `[[devices]]` entry.
-
-Device mutation preserves unrelated top-level node settings such as `bind` and
-legacy receiver token fields.
-
-Legacy flat `receiver_url` and `token` remain readable for compatibility.
-
-## URL Validation
-
-The playback backend accepts only supported YouTube video URLs using `http://`
-or `https://`, including:
-
-```text
-https://www.youtube.com/watch?v=...
-https://music.youtube.com/watch?v=...
-https://youtu.be/...
-```
-
-Unsupported schemes, malformed authorities, credentials in authorities, unknown
-hosts, and empty video IDs are rejected. Playlist context is stripped when a
-valid video remains; standalone playlist expansion is not implemented.
