@@ -18,7 +18,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: Apply reviewed node fixes
+      - name: Apply reviewed fixes
         if: github.event_name == 'pull_request'
         run: |
           python3 - <<'PY'
@@ -116,13 +116,35 @@ jobs:
               text = text[:end] + test + text[end:]
 
           path.write_text(text)
+
+          main_path = Path("src/main.rs")
+          main = main_path.read_text()
+          test_marker = "#[cfg(test)]\nmod tests {"
+          logging_marker = "fn init_serve_logging() {"
+          test_pos = main.find(test_marker)
+          logging_pos = main.find(logging_marker)
+          if test_pos == -1 or logging_pos == -1:
+              raise SystemExit("could not locate main test/logging sections")
+          if logging_pos > test_pos:
+              prefix = main[:logging_pos].rstrip()
+              logging_fn = main[logging_pos:].strip()
+              test_pos = prefix.find(test_marker)
+              main = (
+                  prefix[:test_pos].rstrip()
+                  + "\n\n"
+                  + logging_fn
+                  + "\n\n"
+                  + prefix[test_pos:].lstrip()
+                  + "\n"
+              )
+              main_path.write_text(main)
           PY
           cargo fmt
-          if ! git diff --quiet -- src/node.rs; then
+          if ! git diff --quiet -- src/node.rs src/main.rs; then
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add src/node.rs
-            git commit -m "fix: harden node response and legacy peer migration"
+            git add src/node.rs src/main.rs
+            git commit -m "fix: satisfy strict node clippy checks"
             git push origin HEAD:${{ github.head_ref }}
           fi
       - name: Check formatting
