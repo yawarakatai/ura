@@ -39,6 +39,7 @@ With `ura`, all of those are the same operation: select a playback device.
 - Pause, resume, stop, loop, inspect status, and view history through the same selected device
 - Pair peers with a temporary six-digit code
 - Switch devices with an interactive terminal selector
+- Share the same selected device between the CLI and Firefox extension
 - Keep `mpv` and its IPC interface local to each node
 
 ## Quick start
@@ -63,6 +64,8 @@ $ ura play "https://youtu.be/..."
 ```
 
 The URL plays through this machine's `mpv` instance.
+
+When installed through the Home Manager module, the user service starts the node for you, so normal use does not require running `ura serve` manually.
 
 ## Pair another device
 
@@ -103,6 +106,29 @@ $ ura status
 
 `--to <NAME>` remains available as a one-shot override when you do not want to change the selected device.
 
+## Firefox extension
+
+The Firefox extension no longer connects to remote peers directly. It talks only to the local ura node on a loopback-only control API, and the local node decides where playback goes.
+
+Authorize Firefox once:
+
+```console
+$ ura pair
+```
+
+Open the extension options, enter the six-digit code, and choose a browser name such as `Firefox`.
+The extension stores only the credential for the local node. Remote peer addresses and peer credentials remain owned by ura itself.
+
+After that, changing the destination from either interface changes the same node state:
+
+```console
+$ ura device select
+```
+
+The extension options show the same selected device and can switch it too. Clicking the toolbar button sends the current tab to whichever device is selected at that moment.
+
+The browser-facing control API listens only on `127.0.0.1:8766`. The peer API may be exposed on the LAN with `--bind`, but the browser control API is never bound to that address.
+
 ## Node model
 
 Local commands are sent to the local `ura` node first. The node resolves the selected destination:
@@ -112,6 +138,8 @@ Local commands are sent to the local `ura` node first. The node resolves the sel
 
 Peer HTTP requests never resolve the receiving node's selected device. They always operate on that node's own `mpv` instance. This prevents accidental multi-hop forwarding and keeps destination selection local to the initiating node.
 
+Firefox follows the same rule: it submits commands to the local node rather than contacting the selected peer itself.
+
 ## Current compatibility
 
-The existing pairing protocol, bearer-token authentication, HTTP peer API, history database, and legacy direct receiver overrides are still supported while the node model is introduced. Existing remote-only controller configurations continue to work when no local `ura` node is running.
+The existing peer pairing protocol, bearer-token authentication, HTTP peer API, history database, and legacy direct receiver overrides are still supported while the node model is introduced. Existing remote-only controller configurations continue to work when no local `ura` node is running.
