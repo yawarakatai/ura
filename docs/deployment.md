@@ -185,12 +185,12 @@ Firefox is authorized against its local ura node, not against every remote peer.
 The extension then accesses only `127.0.0.1:8766`. Remote peer credentials stay
 inside ura configuration and are never copied into new extension state.
 
-Revoking Firefox's authorized-device credential causes the extension to request
+Revoking Firefox's authorized-client credential causes the extension to request
 pairing again.
 
 ## Compatibility Credentials
 
-Authorized devices are stored in the SQLite database under `XDG_DATA_HOME` or
+Authorized clients are stored in the SQLite database under `XDG_DATA_HOME` or
 `~/.local/share/ura/ura.db` as token hashes.
 
 The legacy top-level peer API token and `receiver_url` settings remain readable
@@ -202,7 +202,7 @@ receiver_url = "http://192.168.1.20:8765"
 ```
 
 The legacy peer API token is accepted only by the peer HTTP compatibility path;
-the loopback browser API authenticates against authorized-device credentials.
+the loopback browser API authenticates against authorized-client credentials.
 
 ## Troubleshooting
 

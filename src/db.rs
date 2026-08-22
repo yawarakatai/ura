@@ -204,7 +204,7 @@ impl Database {
     }
 
     pub fn authorize_client(&self, name: &str, token: &str) -> Result<()> {
-        validate_device_name(name)?;
+        validate_client_name(name)?;
         let token_hash = hash_token(token);
         let conn = self.connect()?;
         conn.execute(
@@ -212,12 +212,12 @@ impl Database {
              VALUES (?1, ?2, ?3)",
             params![name, token_hash, now_text()],
         )
-        .with_context(|| format!("failed to authorize device `{name}`"))?;
+        .with_context(|| format!("failed to authorize client `{name}`"))?;
         Ok(())
     }
 
     pub fn revoke_authorized_client(&self, name: &str) -> Result<bool> {
-        validate_device_name(name)?;
+        validate_client_name(name)?;
         let conn = self.connect()?;
         let changed = conn
             .execute(
@@ -226,7 +226,7 @@ impl Database {
                  WHERE name = ?2 AND revoked_at IS NULL",
                 params![now_text(), name],
             )
-            .with_context(|| format!("failed to revoke device `{name}`"))?;
+            .with_context(|| format!("failed to revoke client `{name}`"))?;
         Ok(changed > 0)
     }
 
@@ -248,7 +248,7 @@ impl Database {
         })?;
 
         rows.collect::<rusqlite::Result<Vec<_>>>()
-            .with_context(|| "failed to read authorized devices")
+            .with_context(|| "failed to read authorized clients")
     }
 
     pub fn authenticate_authorized_token(&self, token: &str) -> Result<bool> {
@@ -323,9 +323,9 @@ pub fn hash_token(token: &str) -> String {
     hex_encode(&Sha256::digest(token.as_bytes()))
 }
 
-pub fn validate_device_name(name: &str) -> Result<()> {
+pub fn validate_client_name(name: &str) -> Result<()> {
     if name.trim().is_empty() {
-        anyhow::bail!("device name must not be empty");
+        anyhow::bail!("client name must not be empty");
     }
     Ok(())
 }
@@ -353,7 +353,7 @@ fn update_last_seen_if_stale(conn: &Connection, id: i64, last_seen_at: Option<&s
             "UPDATE authorized_devices SET last_seen_at = ?1 WHERE id = ?2",
             params![now, id],
         )
-        .with_context(|| "failed to update authorized device last_seen_at")?;
+        .with_context(|| "failed to update authorized client last_seen_at")?;
     }
     Ok(())
 }

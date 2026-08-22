@@ -223,13 +223,13 @@ impl DeviceConfig {
 
     pub fn add_paired(
         config_path: Option<&Path>,
-        receiver_alias: &str,
+        peer_alias: &str,
         address: &str,
         token: &str,
         local_name: &str,
         select: bool,
     ) -> Result<()> {
-        validate_device_name(receiver_alias)?;
+        validate_device_name(peer_alias)?;
         validate_device_name(local_name)?;
         if token.trim().is_empty() {
             anyhow::bail!("device token must not be empty");
@@ -239,18 +239,18 @@ impl DeviceConfig {
         if config
             .devices
             .iter()
-            .any(|device| device.name == receiver_alias)
+            .any(|device| device.name == peer_alias)
         {
-            anyhow::bail!("device `{receiver_alias}` already exists");
+            anyhow::bail!("device `{peer_alias}` already exists");
         }
         config.local_name = Some(local_name.to_string());
         config.devices.push(Peer {
-            name: receiver_alias.to_string(),
+            name: peer_alias.to_string(),
             url: normalize_peer_address(address)?,
             token: token.to_string(),
         });
         if select {
-            config.selected_device = Some(receiver_alias.to_string());
+            config.selected_device = Some(peer_alias.to_string());
         }
         write_device_config(&path, &config)
     }
@@ -366,7 +366,7 @@ fn init_config_at_path(path: &Path, init: ConfigInit) -> Result<PathBuf> {
 pub fn normalize_peer_address(address: &str) -> Result<String> {
     let address = address.trim();
     if address.is_empty() || address.chars().any(char::is_whitespace) {
-        anyhow::bail!("receiver address must not be empty or contain whitespace");
+        anyhow::bail!("peer address must not be empty or contain whitespace");
     }
     let candidate = if address.contains("://") {
         address.to_string()
@@ -375,19 +375,19 @@ pub fn normalize_peer_address(address: &str) -> Result<String> {
     };
     let rest = candidate
         .strip_prefix("http://")
-        .ok_or_else(|| anyhow::anyhow!("unsupported receiver address scheme"))?;
+        .ok_or_else(|| anyhow::anyhow!("unsupported peer address scheme"))?;
     if rest.contains("://") {
-        anyhow::bail!("unsupported receiver address scheme");
+        anyhow::bail!("unsupported peer address scheme");
     }
     if rest.contains('?') || rest.contains('#') {
-        anyhow::bail!("receiver address must not include a query or fragment");
+        anyhow::bail!("peer address must not include a query or fragment");
     }
     let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
     if !path.is_empty() {
-        anyhow::bail!("receiver address must not include a path");
+        anyhow::bail!("peer address must not include a path");
     }
     if authority.contains('@') {
-        anyhow::bail!("receiver address must not include username or password");
+        anyhow::bail!("peer address must not include username or password");
     }
     let (host, port) = match authority.rsplit_once(':') {
         Some((host, port)) if !port.is_empty() && port.chars().all(|ch| ch.is_ascii_digit()) => (
@@ -772,7 +772,7 @@ token = "secret"
     }
 
     #[test]
-    fn receiver_reads_token_and_bind_from_config_file() {
+    fn node_reads_token_and_bind_from_config_file() {
         let config = NodeConfig::from_sources(
             Some(FileConfig {
                 peer_url: None,
@@ -784,7 +784,7 @@ token = "secret"
             None,
             None,
         )
-        .expect("load receiver config");
+        .expect("load node config");
 
         assert_eq!(config.bind, "127.0.0.1:9999".parse().expect("parse bind"));
         assert_eq!(
@@ -794,7 +794,7 @@ token = "secret"
     }
 
     #[test]
-    fn receiver_defaults_bind_when_config_omits_it() {
+    fn node_defaults_bind_when_config_omits_it() {
         let config = NodeConfig::from_sources(
             Some(FileConfig {
                 peer_url: None,
@@ -806,13 +806,13 @@ token = "secret"
             None,
             None,
         )
-        .expect("load receiver config");
+        .expect("load node config");
 
         assert_eq!(config.bind, default_bind());
     }
 
     #[test]
-    fn receiver_can_omit_legacy_token() {
+    fn node_can_omit_legacy_token() {
         let config = NodeConfig::from_sources(
             Some(FileConfig {
                 peer_url: None,
@@ -824,13 +824,13 @@ token = "secret"
             None,
             None,
         )
-        .expect("load receiver config");
+        .expect("load node config");
 
         assert_eq!(config.token, None);
     }
 
     #[test]
-    fn env_overrides_receiver_config_file() {
+    fn env_overrides_node_config_file() {
         let config = NodeConfig::from_sources(
             Some(FileConfig {
                 peer_url: None,
@@ -842,14 +842,14 @@ token = "secret"
             Some("env-token".to_string()),
             Some(Ok("127.0.0.1:7777".parse().expect("parse bind"))),
         )
-        .expect("load receiver config");
+        .expect("load node config");
 
         assert_eq!(config.bind, "127.0.0.1:7777".parse().expect("parse bind"));
         assert_eq!(config.token.as_deref(), Some("env-token"));
     }
 
     #[test]
-    fn cli_overrides_env_and_receiver_config_file() {
+    fn cli_overrides_env_and_node_config_file() {
         let config = NodeConfig::from_sources(
             Some(FileConfig {
                 peer_url: None,
@@ -861,7 +861,7 @@ token = "secret"
             Some("cli-token".to_string()),
             Some(Ok("127.0.0.1:7777".parse().expect("parse bind"))),
         )
-        .expect("load receiver config");
+        .expect("load node config");
 
         assert_eq!(config.bind, "127.0.0.1:6666".parse().expect("parse bind"));
         assert_eq!(config.token.as_deref(), Some("cli-token"));
@@ -881,7 +881,7 @@ token = "secret"
     }
 
     #[test]
-    fn receive_can_load_token_without_peer_url() {
+    fn node_can_load_legacy_token_without_peer_url() {
         let file_config = FileConfig {
             peer_url: None,
             token: Some("secret".to_string()),
@@ -889,7 +889,7 @@ token = "secret"
             ..FileConfig::default()
         };
 
-        let token = Config::token_from_parts(file_config, None).expect("load receiver token");
+        let token = Config::token_from_parts(file_config, None).expect("load peer API token");
 
         assert_eq!(token, "secret");
     }
@@ -926,7 +926,7 @@ token = "secret"
     }
 
     #[test]
-    fn token_generate_produces_valid_receiver_token() {
+    fn token_generate_produces_valid_peer_api_token() {
         let token = generate_token().expect("generate token");
 
         assert!(token.len() >= 32);
@@ -1003,7 +1003,7 @@ token = "0123456789abcdef0123456789abcdef"
     }
 
     #[test]
-    fn normalizes_receiver_addresses() {
+    fn normalizes_peer_addresses() {
         assert_eq!(
             normalize_peer_address("192.168.1.23").expect("normalize"),
             "http://192.168.1.23:8765"
@@ -1027,7 +1027,7 @@ token = "0123456789abcdef0123456789abcdef"
     }
 
     #[test]
-    fn rejects_invalid_receiver_addresses() {
+    fn rejects_invalid_peer_addresses() {
         for address in [
             "https://kamo",
             "http://kamo/path",

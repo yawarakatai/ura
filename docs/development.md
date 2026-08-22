@@ -103,7 +103,7 @@ cover:
 2. `ura pair <address>` claims the session and stores the returned peer token.
 3. Cancellation, expiry, wrong-code exhaustion, and malformed-code behavior.
 4. Normal bearer-protected endpoints remain protected while pairing is active.
-5. Successful authorized-device authentication updates `last_seen_at` no more
+5. Successful authorized-client authentication updates `last_seen_at` no more
    than once per 60 seconds.
 6. Codes, plaintext credentials, token hashes, and Authorization headers do not
    appear in logs.
