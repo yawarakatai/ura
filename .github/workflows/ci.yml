@@ -18,163 +18,65 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: Apply terminology migration
+      - name: Apply reviewed terminology fixes
         if: github.ref_name == 'feat/node-destinations' || github.head_ref == 'feat/node-destinations'
         run: |
           python3 - <<'PY'
           from pathlib import Path
-          import re
-          import subprocess
 
-          def replace_identifier(path, old, new):
+          def replace(pathname, old, new):
+              path = Path(pathname)
               text = path.read_text()
-              text = re.sub(rf"\b{re.escape(old)}\b", new, text)
-              path.write_text(text)
+              if old in text:
+                  text = text.replace(old, new)
+                  path.write_text(text)
 
-          receiver = Path("src/receiver.rs")
-          peer_api = Path("src/peer_api.rs")
-          if receiver.exists() and not peer_api.exists():
-              subprocess.run(["git", "mv", str(receiver), str(peer_api)], check=True)
+          # Keep the Rust command name aligned with the public command.
+          replace("src/cli.rs", '    #[command(name = "daemon", alias = "serve")]\n    Serve {', '    #[command(alias = "serve")]\n    Daemon {')
+          replace("src/main.rs", "Command::Serve { bind }", "Command::Daemon { bind }")
 
-          # Core Rust names: node owns playback; remote nodes are peers.
-          rust_files = list(Path("src").glob("*.rs"))
-          for old, new in [
-              ("RemoteDevice", "Peer"),
-              ("ReceiverConfig", "NodeConfig"),
-              ("HttpClient", "PeerClient"),
-              ("PairingHttpClient", "PeerPairingClient"),
-              ("ReceiverBase", "PeerBase"),
-              ("normalize_receiver_address", "normalize_peer_address"),
-              ("validate_receiver_token", "validate_peer_token"),
-              ("run_serve", "run_peer_api"),
-          ]:
-              for path in rust_files:
-                  replace_identifier(path, old, new)
+          # Canonical CLI field names; old spellings remain clap aliases.
+          replace("src/cli.rs", "pub receiver_url: Option<String>", "pub peer_url: Option<String>")
+          replace("src/main.rs", "cli.receiver_url", "cli.peer_url")
+          replace("src/cli.rs", "        receiver_url: String,", "        peer_url: String,")
+          replace("src/main.rs", "                receiver_url,\n                bind,", "                peer_url,\n                bind,")
+          replace("src/main.rs", "                    receiver_url,\n                    bind,", "                    receiver_url: peer_url,\n                    bind,")
 
-          # Module name describes the peer-facing transport instead of an app role.
-          for path in rust_files:
-              text = path.read_text()
-              text = text.replace("crate::receiver", "crate::peer_api")
-              text = text.replace("pub mod receiver;", "pub mod peer_api;")
-              path.write_text(text)
-
-          # The peer API owns mpv locally; it is not a Receiver role.
-          path = Path("src/peer_api.rs")
-          text = path.read_text()
-          text = re.sub(r"\bReceiver\b", "PlaybackRuntime", text)
-          text = text.replace("let receiver = PlaybackRuntime::start", "let playback = PlaybackRuntime::start")
-          text = text.replace("receiver.into_parts()", "playback.into_parts()")
-          text = text.replace('"receiver startup"', '"peer API startup"')
-          text = text.replace('"receiver shutdown"', '"peer API shutdown"')
-          text = text.replace('"HTTP receiver bind address"', '"peer API bind address"')
-          text = text.replace('"HTTP receiver listening"', '"peer API listening"')
-          text = text.replace('"HTTP receiver failed"', '"peer API failed"')
-          text = text.replace('"HTTP receiver"', '"peer API"')
-          text = text.replace("failed to bind HTTP receiver", "failed to bind peer API")
-          text = text.replace("receiver token", "peer API token")
-          text = text.replace("existing receiver", "existing node")
-          text = text.replace("receiver process task should exist", "playback process task should exist")
-          path.write_text(text)
-
-          # Node supervision uses peer API terminology.
-          path = Path("src/node.rs")
-          text = path.read_text()
-          text = re.sub(r"\breceiver_task\b", "peer_api_task", text)
-          text = re.sub(r"\bwait_for_receiver\b", "wait_for_peer_api", text)
-          text = text.replace('"receiver"', '"peer API"')
-          text = text.replace("receiver task failed", "peer API task failed")
-          text = text.replace("receiver exited during node startup", "peer API exited during node startup")
-          text = text.replace("local ura receiver", "local ura peer API")
-          path.write_text(text)
-
-          # Pairing state uses node_name internally. Pairing protocol v1 HTTP JSON
-          # continues to serialize `receiver_name` for compatibility.
-          path = Path("src/pairing.rs")
-          text = re.sub(r"\breceiver_name\b", "node_name", path.read_text())
-          path.write_text(text)
-
-          path = Path("src/client.rs")
-          text = path.read_text()
-          text = text.replace("pub receiver_name: String,", '#[serde(rename = "receiver_name")]\n    pub node_name: String,')
-          text = text.replace(".receiver_name", ".node_name")
-          text = text.replace("failed to connect to receiver", "failed to connect to peer")
-          text = text.replace("HTTP request to receiver", "HTTP request to peer")
-          text = text.replace("HTTP response from receiver", "HTTP response from peer")
-          text = text.replace("receiver did not return", "peer did not return")
-          text = text.replace("receiver returned HTTP", "peer returned HTTP")
-          text = text.replace("receiver JSON response", "peer JSON response")
-          path.write_text(text)
-
-          path = Path("src/peer_api.rs")
-          text = path.read_text()
-          text = text.replace(
-              "struct PairInfoResponse {\n    pairing: bool,\n    receiver_name: String,",
-              'struct PairInfoResponse {\n    pairing: bool,\n    #[serde(rename = "receiver_name")]\n    node_name: String,',
+          # Pairing option names describe nodes rather than the old controller/receiver roles.
+          replace(
+              "src/cli.rs",
+              "        /// This node's name stored on the peer.\n        #[arg(long)]\n        device_name: Option<String>,",
+              "        /// This node's name stored on the peer.\n        #[arg(long = \"node-name\", alias = \"device-name\")]\n        node_name: Option<String>,",
           )
-          text = text.replace(
-              "struct PairClaimResponse {\n    protocol_version: u8,\n    receiver_name: String,",
-              'struct PairClaimResponse {\n    protocol_version: u8,\n    #[serde(rename = "receiver_name")]\n    node_name: String,',
-          )
-          text = text.replace("PairingStatus::Active {\n            receiver_name,", "PairingStatus::Active {\n            node_name,")
-          text = text.replace("            receiver_name,\n            expires_in,", "            node_name,\n            expires_in,")
-          text = text.replace("let receiver_name = match state.pairing.status().await", "let node_name = match state.pairing.status().await")
-          text = text.replace("PairingStatus::Active { receiver_name, .. } => receiver_name", "PairingStatus::Active { node_name, .. } => node_name")
-          text = text.replace("        receiver_name,\n        token,", "        node_name,\n        token,")
-          path.write_text(text)
+          replace("src/main.rs", "            device_name,\n            name,", "            node_name,\n            name,")
+          replace("src/main.rs", "                device_name,\n                name,", "                node_name,\n                name,")
+          replace("src/main.rs", "    device_name: Option<String>,\n    name: Option<String>,", "    node_name: Option<String>,\n    name: Option<String>,")
+          replace("src/main.rs", "let local_name = match device_name {", "let local_name = match node_name {")
 
-          # Local browser API is new in 0.3, so expose node_name directly.
-          path = Path("src/local_api.rs")
-          text = path.read_text()
-          text = text.replace("receiver_url", "peer_url")
-          text = text.replace("receiver_name", "node_name")
-          text = text.replace("claim.node_name || info.node_name", "claim.node_name || info.node_name")
-          path.write_text(text)
+          # Fix references exposed by the cross-file type rename.
+          replace("src/main.rs", "info.receiver_name", "info.node_name")
+          replace("src/node.rs", "receiver::run_peer_api", "peer_api::run_peer_api")
+          replace("src/peer_api.rs", "oneshot::PlaybackRuntime", "oneshot::Receiver")
+          replace("src/peer_api.rs", "before starting the receiver", "before starting the node")
+          replace("src/config.rs", "invalid receiver address host", "invalid peer address host")
 
-          # Canonical env var is URA_PEER_URL; the old one remains a fallback.
-          path = Path("src/config.rs")
-          text = path.read_text()
-          text = text.replace("fn env_receiver_url() -> Option<String> {\n    env::var(\"URA_RECEIVER_URL\").ok()\n}", "fn env_receiver_url() -> Option<String> {\n    env::var(\"URA_PEER_URL\")\n        .ok()\n        .or_else(|| env::var(\"URA_RECEIVER_URL\").ok())\n}")
-          path.write_text(text)
-
-          # Firefox consumes the new local API node_name but legacy peer HTTP
-          # compatibility stays confined to Rust's peer protocol implementation.
-          path = Path("extension/lib.js")
-          text = path.read_text()
-          text = text.replace("claim.receiver_name || info.receiver_name", "claim.node_name || info.node_name")
-          text = text.replace("`ura serve`", "`ura daemon`")
-          path.write_text(text)
-
-          path = Path("extension/lib.test.js")
-          text = path.read_text()
-          text = text.replace("receiver_name: \"kamo\"", "node_name: \"kamo\"")
-          text = text.replace("Start `ura serve`", "Start `ura daemon`")
-          path.write_text(text)
-
-          # User-visible docs and service examples use daemon/node/peer/client.
-          for filename in [
+          # Canonical examples and browser errors use daemon.
+          for pathname in [
               "README.md",
               "AGENTS.md",
               "docs/architecture.md",
               "docs/deployment.md",
               "docs/development.md",
               "docs/pairing-auth.md",
+              "extension/lib.js",
+              "extension/lib.test.js",
               "extension/options.html",
               "extension/options.js",
               "contrib/systemd/ura.service",
               "nix/home-manager-module.nix",
           ]:
-              path = Path(filename)
-              text = path.read_text()
-              text = text.replace("ura serve", "ura daemon")
-              text = text.replace("Authorized controllers", "Authorized clients")
-              text = text.replace("authorized controllers", "authorized clients")
-              text = text.replace("controller credential", "client credential")
-              text = text.replace("controller token", "client token")
-              text = text.replace("receiver process", "node daemon")
-              text = text.replace("receiver service", "node service")
-              text = text.replace("receiver API", "peer API")
-              text = text.replace("Receiver API", "Peer API")
-              path.write_text(text)
+              replace(pathname, "ura serve", "ura daemon")
+              replace(pathname, "cargo run -- serve", "cargo run -- daemon")
           PY
 
           cargo fmt
@@ -182,7 +84,7 @@ jobs:
           if ! git diff --cached --quiet; then
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git commit -m "refactor: adopt node and peer terminology"
+            git commit -m "fix: complete node terminology migration"
             git push origin HEAD:${{ github.head_ref || github.ref_name }}
           fi
       - name: Check formatting
