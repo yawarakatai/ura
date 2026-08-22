@@ -31,46 +31,46 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Command::Serve { bind } => {
-            init_serve_logging();
+            init_daemon_logging();
             let config_path = cli.config.clone();
             let config = ReceiverConfig::load_with_overrides(cli.config, bind, cli.token)?;
             run_node(config.bind, config.token, config_path).await
         }
         Command::Play { to, url } => {
-            let client = controller_for(cli.config, cli.receiver_url, cli.token, to)?;
+            let client = playback_client_for(cli.config, cli.receiver_url, cli.token, to)?;
             client.play(&url)?;
             println!("play: sent {url}");
             Ok(())
         }
         Command::Queue { to, url } => {
-            let client = controller_for(cli.config, cli.receiver_url, cli.token, to)?;
+            let client = playback_client_for(cli.config, cli.receiver_url, cli.token, to)?;
             client.queue(&url)?;
             println!("queue: sent {url}");
             Ok(())
         }
         Command::Pause { to } => {
-            controller_for(cli.config, cli.receiver_url, cli.token, to)?.control("pause")?;
+            playback_client_for(cli.config, cli.receiver_url, cli.token, to)?.control("pause")?;
             println!("pause: sent");
             Ok(())
         }
         Command::Resume { to } => {
-            controller_for(cli.config, cli.receiver_url, cli.token, to)?.control("resume")?;
+            playback_client_for(cli.config, cli.receiver_url, cli.token, to)?.control("resume")?;
             println!("resume: sent");
             Ok(())
         }
         Command::Toggle { to } => {
-            controller_for(cli.config, cli.receiver_url, cli.token, to)?.control("toggle")?;
+            playback_client_for(cli.config, cli.receiver_url, cli.token, to)?.control("toggle")?;
             println!("toggle: sent");
             Ok(())
         }
         Command::Stop { to } => {
-            controller_for(cli.config, cli.receiver_url, cli.token, to)?.control("stop")?;
+            playback_client_for(cli.config, cli.receiver_url, cli.token, to)?.control("stop")?;
             println!("stop: sent");
             Ok(())
         }
         Command::Loop { to, command } => {
             let to = command_to_device(&to, &command);
-            let client = controller_for(cli.config, cli.receiver_url, cli.token, to)?;
+            let client = playback_client_for(cli.config, cli.receiver_url, cli.token, to)?;
             match command {
                 None => {
                     if client.loop_status()? == LoopStatus::One {
@@ -107,7 +107,7 @@ async fn main() -> Result<()> {
             select,
             no_select,
         } => match address {
-            Some(address) => pair_controller(
+            Some(address) => pair_peer(
                 cli.config.as_deref(),
                 &address,
                 code,
@@ -116,7 +116,7 @@ async fn main() -> Result<()> {
                 select,
                 no_select,
             ),
-            None => pair_receiver().await,
+            None => open_pairing().await,
         },
         Command::Device { command } => match command {
             DeviceCommand::List => {
@@ -152,7 +152,7 @@ async fn main() -> Result<()> {
             DeviceCommand::Authorize { name } => {
                 let database = Database::open(default_db_path()?)?;
                 let token = authorize_device(&database, &name)?;
-                println!("Authorized controller \"{name}\".");
+                println!("Authorized client \"{name}\".");
                 println!();
                 println!("Token:");
                 println!("  {token}");
@@ -163,10 +163,10 @@ async fn main() -> Result<()> {
             DeviceCommand::Revoke { name } => {
                 let database = Database::open(default_db_path()?)?;
                 if database.revoke_authorized_device(&name)? {
-                    println!("revoked controller: {name}");
+                    println!("revoked client: {name}");
                     Ok(())
                 } else {
-                    anyhow::bail!("unknown active authorized controller `{name}`")
+                    anyhow::bail!("unknown active authorized client `{name}`")
                 }
             }
         },
@@ -195,19 +195,20 @@ async fn main() -> Result<()> {
             }
         },
         Command::Status { to } => {
-            let status = controller_for(cli.config, cli.receiver_url, cli.token, to)?.status()?;
+            let status = playback_client_for(cli.config, cli.receiver_url, cli.token, to)?.status()?;
             print_status(&status);
             Ok(())
         }
         Command::History { to } => {
-            let history = controller_for(cli.config, cli.receiver_url, cli.token, to)?.history()?;
+            let history =
+                playback_client_for(cli.config, cli.receiver_url, cli.token, to)?.history()?;
             print_history(&history);
             Ok(())
         }
     }
 }
 
-enum ControllerClient {
+enum PlaybackClient {
     Node {
         client: NodeClient,
         to: Option<String>,
@@ -215,7 +216,7 @@ enum ControllerClient {
     Http(HttpClient),
 }
 
-impl ControllerClient {
+impl PlaybackClient {
     fn play(&self, url: &str) -> Result<()> {
         match self {
             Self::Node { client, to } => client.play(url, to.as_deref()),
@@ -259,37 +260,38 @@ impl ControllerClient {
     }
 }
 
-fn controller_for(
+fn playback_client_for(
     config_path: Option<std::path::PathBuf>,
-    receiver_url: Option<String>,
+    peer_url: Option<String>,
     token: Option<String>,
     to: Option<String>,
-) -> Result<ControllerClient> {
-    let has_legacy_override = receiver_url.is_some()
+) -> Result<PlaybackClient> {
+    let has_legacy_override = peer_url.is_some()
         || token.is_some()
+        || std::env::var_os("URA_PEER_URL").is_some()
         || std::env::var_os("URA_RECEIVER_URL").is_some()
         || std::env::var_os("URA_TOKEN").is_some();
     if has_legacy_override {
-        let config = Config::load_with_overrides(config_path, receiver_url, token)?;
-        return Ok(ControllerClient::Http(HttpClient::new(
+        let config = Config::load_with_overrides(config_path, peer_url, token)?;
+        return Ok(PlaybackClient::Http(HttpClient::new(
             config.receiver_url,
             config.token,
         )?));
     }
 
     if config_path.is_none() && NodeClient::is_available() {
-        return Ok(ControllerClient::Node {
+        return Ok(PlaybackClient::Node {
             client: NodeClient::new()?,
             to,
         });
     }
 
     match resolve_destination(config_path.as_deref(), to.as_deref())? {
-        Destination::Peer(peer) => Ok(ControllerClient::Http(HttpClient::new(
+        Destination::Peer(peer) => Ok(PlaybackClient::Http(HttpClient::new(
             peer.url, peer.token,
         )?)),
         Destination::SelfNode { name } => anyhow::bail!(
-            "this device (`{name}`) is selected, but the local ura node is not running\n\nStart it with:\n  ura serve"
+            "this device (`{name}`) is selected, but the local ura node is not running\n\nStart it with:\n  ura daemon"
         ),
     }
 }
@@ -310,7 +312,7 @@ fn set_selected_device(config_path: Option<&std::path::Path>, name: &str) -> Res
     }
 }
 
-async fn pair_receiver() -> Result<()> {
+async fn open_pairing() -> Result<()> {
     let started: PairControlResponse = control_socket_request("pair_start")?;
     let PairControlResponse::PairStart {
         code,
@@ -384,7 +386,7 @@ async fn pair_receiver() -> Result<()> {
     }
 }
 
-fn pair_controller(
+fn pair_peer(
     config_path: Option<&std::path::Path>,
     address: &str,
     code: Option<String>,
@@ -521,7 +523,7 @@ where
     let socket_path = default_control_socket_path()?;
     let mut stream = UnixStream::connect(&socket_path).with_context(|| {
         format!(
-            "ura serve is not running or pairing socket is unavailable at {}",
+            "ura daemon is not running or pairing socket is unavailable at {}",
             socket_path.display()
         )
     })?;
@@ -664,7 +666,7 @@ fn render_devices(devices: &DeviceSet, authorized: &[ura::db::AuthorizedDevice])
     }
 
     output.push('\n');
-    output.push_str("Authorized controllers:\n");
+    output.push_str("Authorized clients:\n");
     if authorized.is_empty() {
         output.push_str("  none\n");
     } else {
@@ -751,7 +753,7 @@ fn truncate(value: &str, width: usize) -> String {
     format!("{prefix}...")
 }
 
-fn init_serve_logging() {
+fn init_daemon_logging() {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("ura=info"));
     let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
