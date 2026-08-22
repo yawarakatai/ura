@@ -498,7 +498,12 @@ pub fn device_set(config_path: Option<&Path>) -> Result<DeviceSet> {
     Ok(DeviceSet { selected, devices })
 }
 
-pub fn add_peer(config_path_override: Option<&Path>, name: &str, address: &str, token: &str) -> Result<()> {
+pub fn add_peer(
+    config_path_override: Option<&Path>,
+    name: &str,
+    address: &str,
+    token: &str,
+) -> Result<()> {
     validate_peer_input(name, token)?;
     let mut config = DeviceConfig::load(config_path_override)?;
     let local_name = config
@@ -651,7 +656,10 @@ fn persist_device_config(config_path_override: Option<&Path>, config: &DeviceCon
                 let mut peer = toml::map::Map::new();
                 peer.insert("name".to_string(), toml::Value::String(device.name.clone()));
                 peer.insert("url".to_string(), toml::Value::String(device.url.clone()));
-                peer.insert("token".to_string(), toml::Value::String(device.token.clone()));
+                peer.insert(
+                    "token".to_string(),
+                    toml::Value::String(device.token.clone()),
+                );
                 toml::Value::Table(peer)
             })
             .collect();
@@ -667,7 +675,8 @@ fn load_toml_root(path: &Path) -> Result<toml::Value> {
     }
     let contents = fs::read_to_string(path)
         .with_context(|| format!("failed to read config file {}", path.display()))?;
-    toml::from_str(&contents).with_context(|| format!("failed to parse config file {}", path.display()))
+    toml::from_str(&contents)
+        .with_context(|| format!("failed to parse config file {}", path.display()))
 }
 
 fn validate_peer_input(name: &str, token: &str) -> Result<()> {
@@ -902,13 +911,7 @@ receiver_url = "http://192.168.1.10:8765"
         )
         .expect("write config");
 
-        add_peer(
-            Some(&path),
-            "bedroom",
-            "192.168.1.20",
-            "bedroom-token",
-        )
-        .expect("add peer");
+        add_peer(Some(&path), "bedroom", "192.168.1.20", "bedroom-token").expect("add peer");
 
         let config = DeviceConfig::load(Some(&path)).expect("reload config");
         assert_eq!(config.devices.len(), 2);

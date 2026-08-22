@@ -640,7 +640,10 @@ fn render_devices(devices: &DeviceSet, authorized: &[ura::db::AuthorizedDevice])
     let mut output = String::new();
     output.push_str(&format!("Selected device: {}\n\n", devices.selected));
     output.push_str("Devices:\n");
-    output.push_str(&format!("  {:<2} {:<18} {:<12} ADDRESS\n", "", "NAME", "TYPE"));
+    output.push_str(&format!(
+        "  {:<2} {:<18} {:<12} ADDRESS\n",
+        "", "NAME", "TYPE"
+    ));
     for device in &devices.devices {
         let marker = if device.name == devices.selected {
             "*"

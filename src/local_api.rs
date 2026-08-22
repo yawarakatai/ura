@@ -1,4 +1,7 @@
-use std::{net::{Ipv4Addr, SocketAddr}, sync::Arc};
+use std::{
+    net::{Ipv4Addr, SocketAddr},
+    sync::Arc,
+};
 
 use anyhow::{Context, Result};
 use axum::{
@@ -27,10 +30,7 @@ pub fn default_local_api_address() -> SocketAddr {
     SocketAddr::from((Ipv4Addr::LOCALHOST, DEFAULT_LOCAL_API_PORT))
 }
 
-pub async fn run_local_api(
-    receiver_url: String,
-    shutdown: oneshot::Receiver<()>,
-) -> Result<()> {
+pub async fn run_local_api(receiver_url: String, shutdown: oneshot::Receiver<()>) -> Result<()> {
     let bind = default_local_api_address();
     let state = LocalApiState {
         database: Arc::new(Database::open(default_db_path()?)?),
@@ -233,9 +233,12 @@ async fn pair_claim(
     State(state): State<LocalApiState>,
     request: std::result::Result<Json<PairClaimRequest>, JsonRejection>,
 ) -> std::result::Result<Json<PairClaimResponse>, LocalApiError> {
-    let Json(request) = request
-        .map_err(|_| LocalApiError::new(StatusCode::BAD_REQUEST, "invalid_request"))?;
-    if !request.code.chars().all(|character| character.is_ascii_digit())
+    let Json(request) =
+        request.map_err(|_| LocalApiError::new(StatusCode::BAD_REQUEST, "invalid_request"))?;
+    if !request
+        .code
+        .chars()
+        .all(|character| character.is_ascii_digit())
         || request.code.len() != 6
     {
         return Err(LocalApiError::new(
@@ -282,12 +285,11 @@ async fn require_auth(
 
     let database = Arc::clone(&state.database);
     let token = token.to_string();
-    let authenticated = tokio::task::spawn_blocking(move || {
-        database.authenticate_authorized_token(&token)
-    })
-    .await
-    .map_err(LocalApiError::internal)?
-    .map_err(LocalApiError::internal)?;
+    let authenticated =
+        tokio::task::spawn_blocking(move || database.authenticate_authorized_token(&token))
+            .await
+            .map_err(LocalApiError::internal)?
+            .map_err(LocalApiError::internal)?;
 
     if !authenticated {
         warn!(reason = "invalid bearer token", "local API auth failure");
