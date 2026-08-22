@@ -751,6 +751,12 @@ fn truncate(value: &str, width: usize) -> String {
     format!("{prefix}...")
 }
 
+fn init_serve_logging() {
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("ura=info"));
+    let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -830,10 +836,4 @@ mod tests {
         assert!(!output.contains("secret-token"));
         assert!(!output.contains("token_hash"));
     }
-}
-
-fn init_serve_logging() {
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("ura=info"));
-    let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
 }
