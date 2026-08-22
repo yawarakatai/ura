@@ -429,11 +429,11 @@ pub fn resolve_destination(config_path: Option<&Path>, to: Option<&str>) -> Resu
             return Ok(Destination::Peer(peer));
         }
         if let Some(legacy) = config
-            .legacy_device
+            .legacy_peer
             .as_ref()
             .filter(|device| device.name == name)
         {
-            if is_loopback_receiver_url(&legacy.url) {
+            if is_loopback_peer_url(&legacy.url) {
                 return Ok(Destination::SelfNode { name: local_name });
             }
             return Ok(Destination::Peer(legacy.clone()));
@@ -451,8 +451,8 @@ pub fn resolve_destination(config_path: Option<&Path>, to: Option<&str>) -> Resu
         return Ok(Destination::Peer(peer));
     }
 
-    if let Some(legacy) = &config.legacy_device
-        && !is_loopback_receiver_url(&legacy.url)
+    if let Some(legacy) = &config.legacy_peer
+        && !is_loopback_peer_url(&legacy.url)
     {
         return Ok(Destination::Peer(legacy.clone()));
     }
@@ -467,9 +467,9 @@ pub fn device_set(config_path: Option<&Path>) -> Result<DeviceSet> {
         .clone()
         .unwrap_or_else(default_device_name);
     let legacy_peer = config
-        .legacy_device
+        .legacy_peer
         .as_ref()
-        .filter(|device| !is_loopback_receiver_url(&device.url));
+        .filter(|device| !is_loopback_peer_url(&device.url));
     let selected = config
         .selected_device
         .clone()
@@ -589,9 +589,9 @@ pub fn select_device(config_path_override: Option<&Path>, name: &str) -> Result<
 
     if config.devices.is_empty()
         && config
-            .legacy_device
+            .legacy_peer
             .as_ref()
-            .is_some_and(|legacy| !is_loopback_receiver_url(&legacy.url))
+            .is_some_and(|legacy| !is_loopback_peer_url(&legacy.url))
     {
         migrate_legacy_peer(&mut config);
     }
@@ -616,8 +616,8 @@ fn migrate_legacy_peer(config: &mut DeviceConfig) {
     if !config.devices.is_empty() {
         return;
     }
-    if let Some(legacy) = &config.legacy_device
-        && !is_loopback_receiver_url(&legacy.url)
+    if let Some(legacy) = &config.legacy_peer
+        && !is_loopback_peer_url(&legacy.url)
     {
         config.devices.push(legacy.clone());
     }
@@ -630,8 +630,8 @@ fn persist_device_config(config_path_override: Option<&Path>, config: &DeviceCon
         .as_table_mut()
         .ok_or_else(|| anyhow::anyhow!("config root must be a TOML table"))?;
 
-    let materialized_legacy_peer = config.legacy_device.as_ref().is_some_and(|legacy| {
-        !is_loopback_receiver_url(&legacy.url)
+    let materialized_legacy_peer = config.legacy_peer.as_ref().is_some_and(|legacy| {
+        !is_loopback_peer_url(&legacy.url)
             && config.devices.iter().any(|device| {
                 device.name == legacy.name
                     && device.url == legacy.url
@@ -640,6 +640,7 @@ fn persist_device_config(config_path_override: Option<&Path>, config: &DeviceCon
     });
     if materialized_legacy_peer {
         table.remove("receiver_url");
+        table.remove("peer_url");
     }
 
     match &config.selected_device {
@@ -712,7 +713,7 @@ fn is_local_name(name: &str, local_name: &str) -> bool {
     name == local_name || name.eq_ignore_ascii_case("self") || name.eq_ignore_ascii_case("local")
 }
 
-fn is_loopback_receiver_url(url: &str) -> bool {
+fn is_loopback_peer_url(url: &str) -> bool {
     let Some(rest) = url.strip_prefix("http://") else {
         return false;
     };

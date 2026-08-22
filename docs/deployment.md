@@ -193,7 +193,7 @@ pairing again.
 Authorized devices are stored in the SQLite database under `XDG_DATA_HOME` or
 `~/.local/share/ura/ura.db` as token hashes.
 
-The legacy top-level receiver token and `receiver_url` settings remain readable
+The legacy top-level peer API token and `receiver_url` settings remain readable
 for compatibility:
 
 ```toml
@@ -201,7 +201,7 @@ token = "..."
 receiver_url = "http://192.168.1.20:8765"
 ```
 
-The legacy receiver token is accepted only by the peer HTTP compatibility path;
+The legacy peer API token is accepted only by the peer HTTP compatibility path;
 the loopback browser API authenticates against authorized-device credentials.
 
 ## Troubleshooting

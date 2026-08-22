@@ -110,7 +110,7 @@ device. `--to` is a one-shot override and does not change the stored selection.
 navigation and text filtering. `ura device select <name>` remains suitable for
 scripts.
 
-For compatibility, a controller-only invocation with no running local node can
+For compatibility, a client-only invocation with no running local node can
 still talk directly to an explicitly configured remote peer. Selecting this
 device without a running local node fails with an actionable error because local
 playback requires the long-running node and mpv backend.
@@ -155,7 +155,7 @@ POST /v1/select
 These routes call the local node socket, so Firefox and the CLI share the same
 selected destination.
 
-The browser API authenticates only against active authorized-device token hashes
+The browser API authenticates only against active authorized-client token hashes
 in SQLite. Firefox is authorized once through the existing six-digit pairing
 flow and stores only its local-node credential plus extension preferences.
 Remote peer addresses and peer credentials remain owned by ura.
@@ -195,9 +195,9 @@ GET  /v1/pair/info
 POST /v1/pair/claim
 ```
 
-Normal peer authentication first checks active authorized-device token hashes in
-SQLite. Successful authorized-device authentication updates `last_seen_at` at
-most once per 60 seconds. The legacy configured receiver token remains a
+Normal peer authentication first checks active authorized-client token hashes in
+SQLite. Successful authorized-client authentication updates `last_seen_at` at
+most once per 60 seconds. The legacy configured peer API token remains a
 compatibility fallback.
 
 A peer request always controls the receiving node's own mpv instance. It never
@@ -241,7 +241,7 @@ The IPC endpoint is a local Unix socket and is never exposed over TCP.
 User-supplied URLs are encoded as JSON command arguments and are never passed
 through a shell.
 
-The receiver backend keeps a persistent JSON IPC observer connection and
+The local playback backend keeps a persistent JSON IPC observer connection and
 observes structured properties including media title, duration, metadata, path,
 pause, idle state, playlist position/count, and playback position.
 

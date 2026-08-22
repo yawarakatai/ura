@@ -21,9 +21,9 @@ pub struct PeerPairingClient {
 }
 
 impl PeerPairingClient {
-    pub fn new(receiver_url: String) -> Result<Self> {
+    pub fn new(peer_url: String) -> Result<Self> {
         Ok(Self {
-            base: PeerBase::parse(&receiver_url)?,
+            base: PeerBase::parse(&peer_url)?,
         })
     }
 
@@ -76,9 +76,9 @@ pub struct PairClaim {
 }
 
 impl PeerClient {
-    pub fn new(receiver_url: String, token: String) -> Result<Self> {
+    pub fn new(peer_url: String, token: String) -> Result<Self> {
         Ok(Self {
-            base: PeerBase::parse(&receiver_url)?,
+            base: PeerBase::parse(&peer_url)?,
             token,
         })
     }
@@ -198,10 +198,10 @@ struct PeerBase {
 }
 
 impl PeerBase {
-    fn parse(receiver_url: &str) -> Result<Self> {
-        let rest = receiver_url
+    fn parse(peer_url: &str) -> Result<Self> {
+        let rest = peer_url
             .strip_prefix("http://")
-            .ok_or_else(|| anyhow::anyhow!("receiver_url must start with http://"))?;
+            .ok_or_else(|| anyhow::anyhow!("peer URL must start with http://"))?;
         let (authority, path_prefix) = match rest.split_once('/') {
             Some((authority, path)) => (
                 authority,
@@ -210,7 +210,7 @@ impl PeerBase {
             None => (rest, String::new()),
         };
         if authority.is_empty() {
-            bail!("receiver_url is missing host");
+            bail!("peer URL is missing host");
         }
 
         Ok(Self {
@@ -236,9 +236,9 @@ impl HttpResponse {
             .lines()
             .next()
             .and_then(|line| line.split_whitespace().nth(1))
-            .ok_or_else(|| anyhow::anyhow!("invalid HTTP status from receiver"))?
+            .ok_or_else(|| anyhow::anyhow!("invalid HTTP status from peer"))?
             .parse()
-            .with_context(|| "invalid HTTP status from receiver")?;
+            .with_context(|| "invalid HTTP status from peer")?;
 
         Ok(Self {
             status,
@@ -273,9 +273,9 @@ mod tests {
     };
 
     #[test]
-    fn parses_receiver_base_url() {
+    fn parses_peer_base_url() {
         assert_eq!(
-            PeerBase::parse("http://127.0.0.1:8765").expect("parse receiver URL"),
+            PeerBase::parse("http://127.0.0.1:8765").expect("parse peer URL"),
             PeerBase {
                 address: "127.0.0.1:8765".to_string(),
                 host_header: "127.0.0.1:8765".to_string(),
@@ -285,9 +285,9 @@ mod tests {
     }
 
     #[test]
-    fn rejects_non_http_receiver_url() {
+    fn rejects_non_http_peer_url() {
         let error =
-            PeerBase::parse("https://127.0.0.1:8765").expect_err("https receiver URL should fail");
+            PeerBase::parse("https://127.0.0.1:8765").expect_err("https peer URL should fail");
 
         assert!(error.to_string().contains("http://"));
     }
@@ -378,8 +378,8 @@ mod tests {
     where
         F: FnOnce(&PeerClient) -> Result<T>,
     {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test receiver");
-        let address = listener.local_addr().expect("read test receiver address");
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test peer");
+        let address = listener.local_addr().expect("read test peer address");
         let response_body = response_body.to_string();
         let handle = thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept client request");
@@ -401,7 +401,7 @@ mod tests {
         )
         .expect("create client");
         send(&client).expect("send client request");
-        handle.join().expect("join test receiver")
+        handle.join().expect("join test peer")
     }
 
     fn read_http_request(stream: &mut std::net::TcpStream) -> String {

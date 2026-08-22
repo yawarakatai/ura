@@ -228,7 +228,7 @@ mod tests {
                 "192.168.1.23",
                 "--code",
                 "482913",
-                "--device-name",
+                "--node-name",
                 "desuwa",
                 "--name",
                 "kamo",

@@ -31,7 +31,7 @@ use crate::config::{
     default_control_socket_path, default_db_path, default_device_name, default_mpv_socket_path,
     default_port,
 };
-use crate::db::{Database, HistoryEntry, authorize_device};
+use crate::db::{Database, HistoryEntry, authorize_client};
 use crate::mpv::{
     LoopMode, LoopStatus, MpvClient, MpvEventObserver, QueueMode, SharedPlaybackState,
     observed_status, register_playback_request, rollback_playback_request, shared_playback_state,
@@ -593,18 +593,18 @@ async fn pair_claim(
     let device_name_for_db = device_name.clone();
     let token = tokio::task::spawn_blocking(move || {
         if database
-            .authorized_devices()?
+            .authorized_clients()?
             .iter()
             .any(|device| device.name == device_name_for_db)
         {
-            anyhow::bail!("duplicate authorized device");
+            anyhow::bail!("duplicate authorized client");
         }
-        authorize_device(&database, &device_name_for_db)
+        authorize_client(&database, &device_name_for_db)
     })
     .await
     .map_err(|error| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
     .map_err(|error| {
-        if error.to_string().contains("duplicate authorized device")
+        if error.to_string().contains("duplicate authorized client")
             || error.to_string().contains("UNIQUE constraint")
         {
             AppError::new(StatusCode::CONFLICT, "device_name_exists")
@@ -1344,7 +1344,7 @@ mod tests {
         let (state, db_path) = test_state();
         state
             .database
-            .authorize_device("desuwa", "abcdef0123456789abcdef0123456789")
+            .authorize_client("desuwa", "abcdef0123456789abcdef0123456789")
             .expect("authorize device");
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -1362,11 +1362,11 @@ mod tests {
         let (state, db_path) = test_state();
         state
             .database
-            .authorize_device("desuwa", "abcdef0123456789abcdef0123456789")
+            .authorize_client("desuwa", "abcdef0123456789abcdef0123456789")
             .expect("authorize device");
         state
             .database
-            .revoke_authorized_device("desuwa")
+            .revoke_authorized_client("desuwa")
             .expect("revoke device");
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -1385,15 +1385,15 @@ mod tests {
         let (state, db_path) = test_state();
         state
             .database
-            .authorize_device("desuwa", "abcdef0123456789abcdef0123456789")
+            .authorize_client("desuwa", "abcdef0123456789abcdef0123456789")
             .expect("authorize first");
         state
             .database
-            .authorize_device("firefox", "fedcba9876543210fedcba9876543210")
+            .authorize_client("firefox", "fedcba9876543210fedcba9876543210")
             .expect("authorize second");
         state
             .database
-            .revoke_authorized_device("desuwa")
+            .revoke_authorized_client("desuwa")
             .expect("revoke first");
         let mut headers = HeaderMap::new();
         headers.insert(

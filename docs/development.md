@@ -89,7 +89,7 @@ Use an isolated configuration path when testing migrations. Cover:
 2. Legacy `receiver_url = "http://127.0.0.1:8765"` → this device, not a duplicate peer.
 3. Legacy remote `receiver_url` → usable compatibility peer.
 4. Adding/selecting/removing peers preserves unrelated top-level settings such
-   as `bind` and legacy receiver token fields.
+   as `bind` and legacy peer API token fields.
 5. Selecting this device does not serialize a fake self peer.
 6. No token or token hash appears in normal `device list` output.
 

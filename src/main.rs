@@ -15,7 +15,7 @@ use ura::{
         Config, ConfigInit, DeviceConfig, NodeConfig, default_control_socket_path, default_db_path,
         default_device_name, generate_token, normalize_peer_address,
     },
-    db::{Database, HistoryEntry, authorize_device},
+    db::{Database, HistoryEntry, authorize_client},
     mpv::{LoopStatus, MpvStatus},
     node::{
         Destination, DeviceKind, DeviceSet, NodeClient, add_paired_peer, add_peer, device_set,
@@ -122,7 +122,7 @@ async fn main() -> Result<()> {
             DeviceCommand::List => {
                 let devices = current_devices(cli.config.as_deref())?;
                 let database = Database::open(default_db_path()?)?;
-                print_devices(&devices, &database.authorized_devices()?);
+                print_devices(&devices, &database.authorized_clients()?);
                 Ok(())
             }
             DeviceCommand::Add {
@@ -151,7 +151,7 @@ async fn main() -> Result<()> {
             }
             DeviceCommand::Authorize { name } => {
                 let database = Database::open(default_db_path()?)?;
-                let token = authorize_device(&database, &name)?;
+                let token = authorize_client(&database, &name)?;
                 println!("Authorized client \"{name}\".");
                 println!();
                 println!("Token:");
@@ -162,7 +162,7 @@ async fn main() -> Result<()> {
             }
             DeviceCommand::Revoke { name } => {
                 let database = Database::open(default_db_path()?)?;
-                if database.revoke_authorized_device(&name)? {
+                if database.revoke_authorized_client(&name)? {
                     println!("revoked client: {name}");
                     Ok(())
                 } else {
@@ -178,7 +178,7 @@ async fn main() -> Result<()> {
             } => {
                 let path = Config::init(ConfigInit {
                     config_path: cli.config,
-                    receiver_url: peer_url,
+                    peer_url,
                     bind,
                     token: cli.token,
                     force,
@@ -274,7 +274,7 @@ fn playback_client_for(
     if has_legacy_override {
         let config = Config::load_with_overrides(config_path, peer_url, token)?;
         return Ok(PlaybackClient::Http(PeerClient::new(
-            config.receiver_url,
+            config.peer_url,
             config.token,
         )?));
     }
@@ -632,11 +632,11 @@ fn print_history(history: &[HistoryEntry]) {
     }
 }
 
-fn print_devices(devices: &DeviceSet, authorized: &[ura::db::AuthorizedDevice]) {
+fn print_devices(devices: &DeviceSet, authorized: &[ura::db::AuthorizedClient]) {
     print!("{}", render_devices(devices, authorized));
 }
 
-fn render_devices(devices: &DeviceSet, authorized: &[ura::db::AuthorizedDevice]) -> String {
+fn render_devices(devices: &DeviceSet, authorized: &[ura::db::AuthorizedClient]) -> String {
     let mut output = String::new();
     output.push_str(&format!("Selected device: {}\n\n", devices.selected));
     output.push_str("Devices:\n");
@@ -822,7 +822,7 @@ mod tests {
                 },
             ],
         };
-        let authorized = vec![ura::db::AuthorizedDevice {
+        let authorized = vec![ura::db::AuthorizedClient {
             name: "firefox".to_string(),
             created_at: "2026-07-10 17:35".to_string(),
             last_seen_at: None,

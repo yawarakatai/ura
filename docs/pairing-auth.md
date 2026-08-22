@@ -66,7 +66,7 @@ Non-interactive use remains available:
 ```bash
 ura pair 192.168.1.23 \
   --code 482913 \
-  --device-name desktop \
+  --node-name desktop \
   --name living-room \
   --select
 ```
@@ -98,7 +98,7 @@ http://127.0.0.1:8766
 
 The local API proxies `/v1/pair/info` and `/v1/pair/claim` to the same pairing
 session owned by the local node. This is not a separate pairing mechanism: it
-issues a normal authorized-device token through the same SQLite credential
+issues a normal authorized-client token through the same SQLite credential
 store used by the peer API.
 
 After pairing, Firefox stores only:
@@ -116,7 +116,7 @@ are not owned by the extension. They remain ura node state. This means CLI and
 Firefox device selection cannot drift apart.
 
 Legacy extension settings are migrated only when they contain a localhost
-credential. Old remote-receiver tokens are deliberately not treated as a local
+credential. Old remote peer tokens are deliberately not treated as a local
 node credential.
 
 ## Pairing API
@@ -184,7 +184,7 @@ device list, or database details.
 - successful claim consumes and closes the session
 - timeout, attempt exhaustion, cancellation, and node shutdown close it
 - starting a new session invalidates the previous one
-- duplicate active authorized-device names are rejected
+- duplicate active authorized-client names are rejected
 
 ## Token Storage
 
@@ -220,13 +220,13 @@ There are two HTTP authentication surfaces:
 
 The network-facing peer API checks:
 
-1. active authorized-device token hashes in SQLite
-2. the legacy configured receiver token as a compatibility fallback
+1. active authorized-client token hashes in SQLite
+2. the legacy configured peer API token as a compatibility fallback
 
 ### Browser Control API
 
-The loopback-only browser API checks only active authorized-device token hashes
-in SQLite. It does not accept the legacy receiver token as an implicit browser
+The loopback-only browser API checks only active authorized-client token hashes
+in SQLite. It does not accept the legacy peer API token as an implicit browser
 credential.
 
 The browser API remains bound to `127.0.0.1` even when the peer API is exposed

@@ -32,7 +32,7 @@ pub struct HistoryEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AuthorizedDevice {
+pub struct AuthorizedClient {
     pub name: String,
     pub created_at: String,
     pub last_seen_at: Option<String>,
@@ -203,7 +203,7 @@ impl Database {
             .with_context(|| "failed to read playback history")
     }
 
-    pub fn authorize_device(&self, name: &str, token: &str) -> Result<()> {
+    pub fn authorize_client(&self, name: &str, token: &str) -> Result<()> {
         validate_device_name(name)?;
         let token_hash = hash_token(token);
         let conn = self.connect()?;
@@ -216,7 +216,7 @@ impl Database {
         Ok(())
     }
 
-    pub fn revoke_authorized_device(&self, name: &str) -> Result<bool> {
+    pub fn revoke_authorized_client(&self, name: &str) -> Result<bool> {
         validate_device_name(name)?;
         let conn = self.connect()?;
         let changed = conn
@@ -230,7 +230,7 @@ impl Database {
         Ok(changed > 0)
     }
 
-    pub fn authorized_devices(&self) -> Result<Vec<AuthorizedDevice>> {
+    pub fn authorized_clients(&self) -> Result<Vec<AuthorizedClient>> {
         let conn = self.connect()?;
         let mut statement = conn.prepare(
             "SELECT name, created_at, last_seen_at, revoked_at
@@ -239,7 +239,7 @@ impl Database {
              ORDER BY name",
         )?;
         let rows = statement.query_map([], |row| {
-            Ok(AuthorizedDevice {
+            Ok(AuthorizedClient {
                 name: row.get(0)?,
                 created_at: row.get(1)?,
                 last_seen_at: row.get(2)?,
@@ -330,9 +330,9 @@ pub fn validate_device_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn authorize_device(database: &Database, name: &str) -> Result<String> {
+pub fn authorize_client(database: &Database, name: &str) -> Result<String> {
     let token = generate_token()?;
-    database.authorize_device(name, &token)?;
+    database.authorize_client(name, &token)?;
     Ok(token)
 }
 
@@ -601,7 +601,7 @@ mod tests {
         let database = Database::open(path.clone()).expect("open database");
 
         database
-            .authorize_device("desuwa", "0123456789abcdef0123456789abcdef")
+            .authorize_client("desuwa", "0123456789abcdef0123456789abcdef")
             .expect("authorize device");
 
         assert!(
@@ -614,7 +614,7 @@ mod tests {
                 .authenticate_authorized_token("wrong-wrong-wrong-wrong-wrong-wrong")
                 .expect("authenticate wrong")
         );
-        assert!(database.revoke_authorized_device("desuwa").expect("revoke"));
+        assert!(database.revoke_authorized_client("desuwa").expect("revoke"));
         assert!(
             !database
                 .authenticate_authorized_token("0123456789abcdef0123456789abcdef")
@@ -631,7 +631,7 @@ mod tests {
         let token = "abcdef0123456789abcdef0123456789";
 
         database
-            .authorize_device("firefox", token)
+            .authorize_client("firefox", token)
             .expect("authorize device");
         assert!(
             database
@@ -660,7 +660,7 @@ mod tests {
         let database = Database::open(path.clone()).expect("open database");
 
         database
-            .authorize_device("firefox", "abcdef0123456789abcdef0123456789")
+            .authorize_client("firefox", "abcdef0123456789abcdef0123456789")
             .expect("authorize device");
         assert!(
             !database
@@ -696,7 +696,7 @@ mod tests {
 
         let database = Database::open(path.clone()).expect("reopen database");
         database
-            .authorize_device("desuwa", "0123456789abcdef0123456789abcdef")
+            .authorize_client("desuwa", "0123456789abcdef0123456789abcdef")
             .expect("authorize");
 
         let history = database.history().expect("history");
