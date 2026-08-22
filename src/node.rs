@@ -22,7 +22,10 @@ use tracing::{info, warn};
 
 use crate::{
     client::HttpClient,
-    config::{DeviceConfig, RemoteDevice, config_path, default_device_name, generate_token},
+    config::{
+        DeviceConfig, RemoteDevice, config_path, default_device_name, generate_token,
+        normalize_receiver_address,
+    },
     db::HistoryEntry,
     mpv::{LoopStatus, MpvStatus},
     receiver::run_serve,
@@ -393,20 +396,25 @@ pub fn resolve_destination(config_path: Option<&Path>, to: Option<&str>) -> Resu
         if is_local_name(name, &local_name) {
             return Ok(Destination::SelfNode { name: local_name });
         }
-        return config
+        if let Some(peer) = config
             .devices
             .iter()
             .find(|device| device.name == name)
             .cloned()
-            .or_else(|| {
-                config
-                    .legacy_device
-                    .as_ref()
-                    .filter(|device| device.name == name)
-                    .cloned()
-            })
-            .map(Destination::Peer)
-            .ok_or_else(|| anyhow::anyhow!("unknown device `{name}`"));
+        {
+            return Ok(Destination::Peer(peer));
+        }
+        if let Some(legacy) = config
+            .legacy_device
+            .as_ref()
+            .filter(|device| device.name == name)
+        {
+            if is_loopback_receiver_url(&legacy.url) {
+                return Ok(Destination::SelfNode { name: local_name });
+            }
+            return Ok(Destination::Peer(legacy.clone()));
+        }
+        anyhow::bail!("unknown device `{name}`");
     }
 
     if let Some(selected) = &config.selected_device {
@@ -419,7 +427,9 @@ pub fn resolve_destination(config_path: Option<&Path>, to: Option<&str>) -> Resu
         return Ok(Destination::Peer(peer));
     }
 
-    if let Some(legacy) = &config.legacy_device {
+    if let Some(legacy) = &config.legacy_device
+        && !is_loopback_receiver_url(&legacy.url)
+    {
         return Ok(Destination::Peer(legacy.clone()));
     }
 
@@ -432,10 +442,14 @@ pub fn device_set(config_path: Option<&Path>) -> Result<DeviceSet> {
         .local_name
         .clone()
         .unwrap_or_else(default_device_name);
+    let legacy_peer = config
+        .legacy_device
+        .as_ref()
+        .filter(|device| !is_loopback_receiver_url(&device.url));
     let selected = config
         .selected_device
         .clone()
-        .or_else(|| config.legacy_device.as_ref().map(|device| device.name.clone()))
+        .or_else(|| legacy_peer.map(|device| device.name.clone()))
         .unwrap_or_else(|| local_name.clone());
 
     let mut devices = Vec::with_capacity(config.devices.len() + 2);
@@ -450,7 +464,7 @@ pub fn device_set(config_path: Option<&Path>) -> Result<DeviceSet> {
         address: Some(device.url.clone()),
     }));
     if config.devices.is_empty()
-        && let Some(legacy) = &config.legacy_device
+        && let Some(legacy) = legacy_peer
     {
         devices.push(DeviceSummary {
             name: legacy.name.clone(),
@@ -462,58 +476,132 @@ pub fn device_set(config_path: Option<&Path>) -> Result<DeviceSet> {
     Ok(DeviceSet { selected, devices })
 }
 
+pub fn add_peer(config_path_override: Option<&Path>, name: &str, address: &str, token: &str) -> Result<()> {
+    validate_peer_input(name, token)?;
+    let mut config = DeviceConfig::load(config_path_override)?;
+    let local_name = config
+        .local_name
+        .clone()
+        .unwrap_or_else(default_device_name);
+    if is_local_name(name, &local_name) {
+        anyhow::bail!("device name `{name}` conflicts with this device");
+    }
+    migrate_legacy_peer(&mut config);
+    if config.devices.iter().any(|device| device.name == name) {
+        anyhow::bail!("device `{name}` already exists");
+    }
+    config.devices.push(RemoteDevice {
+        name: name.to_string(),
+        url: normalize_receiver_address(address)?,
+        token: token.to_string(),
+    });
+    persist_device_config(config_path_override, &config)
+}
+
+pub fn add_paired_peer(
+    config_path_override: Option<&Path>,
+    peer_name: &str,
+    address: &str,
+    token: &str,
+    local_name: &str,
+    select: bool,
+) -> Result<()> {
+    validate_peer_input(peer_name, token)?;
+    validate_name(local_name)?;
+    if peer_name == local_name {
+        anyhow::bail!("peer name `{peer_name}` conflicts with this device");
+    }
+
+    let mut config = DeviceConfig::load(config_path_override)?;
+    migrate_legacy_peer(&mut config);
+    if config.devices.iter().any(|device| device.name == peer_name) {
+        anyhow::bail!("device `{peer_name}` already exists");
+    }
+    config.local_name = Some(local_name.to_string());
+    config.devices.push(RemoteDevice {
+        name: peer_name.to_string(),
+        url: normalize_receiver_address(address)?,
+        token: token.to_string(),
+    });
+    if select {
+        config.selected_device = Some(peer_name.to_string());
+    }
+    persist_device_config(config_path_override, &config)
+}
+
+pub fn remove_peer(config_path_override: Option<&Path>, name: &str) -> Result<()> {
+    let mut config = DeviceConfig::load(config_path_override)?;
+    let local_name = config
+        .local_name
+        .clone()
+        .unwrap_or_else(default_device_name);
+    if is_local_name(name, &local_name) {
+        anyhow::bail!("this device cannot be removed");
+    }
+
+    let before = config.devices.len();
+    config.devices.retain(|device| device.name != name);
+    if config.devices.len() == before {
+        anyhow::bail!("unknown device `{name}`");
+    }
+    if config.selected_device.as_deref() == Some(name) {
+        config.selected_device = None;
+    }
+    persist_device_config(config_path_override, &config)
+}
+
 pub fn select_device(config_path_override: Option<&Path>, name: &str) -> Result<String> {
-    let config = DeviceConfig::load(config_path_override)?;
-    let devices = device_set(config_path_override)?;
-    let local_name = devices
-        .devices
-        .iter()
-        .find(|device| device.kind == DeviceKind::ThisDevice)
-        .map(|device| device.name.clone())
-        .ok_or_else(|| anyhow::anyhow!("local node is missing"))?;
+    let mut config = DeviceConfig::load(config_path_override)?;
+    let local_name = config
+        .local_name
+        .clone()
+        .unwrap_or_else(default_device_name);
+    let selecting_self = is_local_name(name, &local_name);
 
-    let selected_remote = if is_local_name(name, &local_name) {
-        None
-    } else {
-        let device = devices
-            .devices
-            .iter()
-            .find(|device| device.kind == DeviceKind::Peer && device.name == name)
-            .ok_or_else(|| anyhow::anyhow!("unknown device `{name}`"))?;
-        Some(device.name.clone())
-    };
+    if config.devices.is_empty()
+        && config
+            .legacy_device
+            .as_ref()
+            .is_some_and(|legacy| !is_loopback_receiver_url(&legacy.url))
+    {
+        migrate_legacy_peer(&mut config);
+    }
 
-    let path = config_path(config_path_override)?;
-    if selected_remote.is_none() && !path.exists() {
+    if selecting_self {
+        config.selected_device = None;
+        if config_path(config_path_override)?.exists() || !config.devices.is_empty() {
+            persist_device_config(config_path_override, &config)?;
+        }
         return Ok(local_name);
     }
 
-    let mut root = if path.exists() {
-        let contents = fs::read_to_string(&path)
-            .with_context(|| format!("failed to read config file {}", path.display()))?;
-        toml::from_str::<toml::Value>(&contents)
-            .with_context(|| format!("failed to parse config file {}", path.display()))?
-    } else {
-        toml::Value::Table(Default::default())
-    };
+    if !config.devices.iter().any(|device| device.name == name) {
+        anyhow::bail!("unknown device `{name}`");
+    }
+    config.selected_device = Some(name.to_string());
+    persist_device_config(config_path_override, &config)?;
+    Ok(name.to_string())
+}
+
+fn migrate_legacy_peer(config: &mut DeviceConfig) {
+    if !config.devices.is_empty() {
+        return;
+    }
+    if let Some(legacy) = &config.legacy_device
+        && !is_loopback_receiver_url(&legacy.url)
+    {
+        config.devices.push(legacy.clone());
+    }
+}
+
+fn persist_device_config(config_path_override: Option<&Path>, config: &DeviceConfig) -> Result<()> {
+    let path = config_path(config_path_override)?;
+    let mut root = load_toml_root(&path)?;
     let table = root
         .as_table_mut()
         .ok_or_else(|| anyhow::anyhow!("config root must be a TOML table"))?;
 
-    if config.devices.is_empty()
-        && let Some(legacy) = &config.legacy_device
-    {
-        let mut peer = toml::map::Map::new();
-        peer.insert("name".to_string(), toml::Value::String(legacy.name.clone()));
-        peer.insert("url".to_string(), toml::Value::String(legacy.url.clone()));
-        peer.insert("token".to_string(), toml::Value::String(legacy.token.clone()));
-        table.insert(
-            "devices".to_string(),
-            toml::Value::Array(vec![toml::Value::Table(peer)]),
-        );
-    }
-
-    match &selected_remote {
+    match &config.selected_device {
         Some(name) => {
             table.insert(
                 "selected_device".to_string(),
@@ -525,12 +613,80 @@ pub fn select_device(config_path_override: Option<&Path>, name: &str) -> Result<
         }
     }
 
-    write_toml_atomic(&path, &root)?;
-    Ok(selected_remote.unwrap_or(local_name))
+    if let Some(local_name) = &config.local_name {
+        let mut local = toml::map::Map::new();
+        local.insert("name".to_string(), toml::Value::String(local_name.clone()));
+        table.insert("local".to_string(), toml::Value::Table(local));
+    }
+
+    if config.devices.is_empty() {
+        table.remove("devices");
+    } else {
+        let devices = config
+            .devices
+            .iter()
+            .map(|device| {
+                let mut peer = toml::map::Map::new();
+                peer.insert("name".to_string(), toml::Value::String(device.name.clone()));
+                peer.insert("url".to_string(), toml::Value::String(device.url.clone()));
+                peer.insert("token".to_string(), toml::Value::String(device.token.clone()));
+                toml::Value::Table(peer)
+            })
+            .collect();
+        table.insert("devices".to_string(), toml::Value::Array(devices));
+    }
+
+    write_toml_atomic(&path, &root)
+}
+
+fn load_toml_root(path: &Path) -> Result<toml::Value> {
+    if !path.exists() {
+        return Ok(toml::Value::Table(Default::default()));
+    }
+    let contents = fs::read_to_string(path)
+        .with_context(|| format!("failed to read config file {}", path.display()))?;
+    toml::from_str(&contents).with_context(|| format!("failed to parse config file {}", path.display()))
+}
+
+fn validate_peer_input(name: &str, token: &str) -> Result<()> {
+    validate_name(name)?;
+    if token.trim().is_empty() {
+        anyhow::bail!("device token must not be empty");
+    }
+    Ok(())
+}
+
+fn validate_name(name: &str) -> Result<()> {
+    if name.trim().is_empty() {
+        anyhow::bail!("device name must not be empty");
+    }
+    Ok(())
 }
 
 fn is_local_name(name: &str, local_name: &str) -> bool {
     name == local_name || name.eq_ignore_ascii_case("self") || name.eq_ignore_ascii_case("local")
+}
+
+fn is_loopback_receiver_url(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("http://") else {
+        return false;
+    };
+    let authority = rest.split('/').next().unwrap_or(rest);
+    let host = if authority.starts_with('[') {
+        authority
+            .split_once(']')
+            .map(|(host, _)| host.trim_start_matches('['))
+            .unwrap_or(authority)
+    } else {
+        authority
+            .rsplit_once(':')
+            .map(|(host, _)| host)
+            .unwrap_or(authority)
+    };
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
 }
 
 fn write_toml_atomic(path: &Path, value: &toml::Value) -> Result<()> {
@@ -627,6 +783,28 @@ mod tests {
     }
 
     #[test]
+    fn legacy_loopback_config_is_this_device_not_a_duplicate_peer() {
+        let path = unique_path("legacy-loopback");
+        fs::write(
+            &path,
+            r#"
+receiver_url = "http://127.0.0.1:8765"
+token = "receiver-token"
+"#,
+        )
+        .expect("write config");
+
+        assert!(matches!(
+            resolve_destination(Some(&path), None).expect("resolve destination"),
+            Destination::SelfNode { .. }
+        ));
+        let devices = device_set(Some(&path)).expect("list devices");
+        assert_eq!(devices.devices.len(), 1);
+        assert_eq!(devices.devices[0].kind, DeviceKind::ThisDevice);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
     fn selected_peer_resolves_to_peer() {
         let path = unique_path("peer");
         fs::write(
@@ -674,8 +852,8 @@ token = "peer-token"
         let selected = select_device(Some(&path), "desktop").expect("select self");
         assert_eq!(selected, "desktop");
 
-        let value: toml::Value = toml::from_str(&fs::read_to_string(&path).expect("read config"))
-            .expect("parse config");
+        let value: toml::Value =
+            toml::from_str(&fs::read_to_string(&path).expect("read config")).expect("parse config");
         let table = value.as_table().expect("config table");
         assert_eq!(
             table.get("token").and_then(toml::Value::as_str),
@@ -686,6 +864,45 @@ token = "peer-token"
             Some("0.0.0.0:8765")
         );
         assert!(!table.contains_key("selected_device"));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn adding_peer_preserves_node_settings_and_migrates_legacy_peer() {
+        let path = unique_path("add-peer");
+        fs::write(
+            &path,
+            r#"
+token = "receiver-token"
+bind = "0.0.0.0:8765"
+receiver_url = "http://192.168.1.10:8765"
+"#,
+        )
+        .expect("write config");
+
+        add_peer(
+            Some(&path),
+            "bedroom",
+            "192.168.1.20",
+            "bedroom-token",
+        )
+        .expect("add peer");
+
+        let config = DeviceConfig::load(Some(&path)).expect("reload config");
+        assert_eq!(config.devices.len(), 2);
+        assert_eq!(config.devices[0].name, "legacy");
+        assert_eq!(config.devices[1].name, "bedroom");
+        let value: toml::Value =
+            toml::from_str(&fs::read_to_string(&path).expect("read config")).expect("parse config");
+        let table = value.as_table().expect("config table");
+        assert_eq!(
+            table.get("token").and_then(toml::Value::as_str),
+            Some("receiver-token")
+        );
+        assert_eq!(
+            table.get("bind").and_then(toml::Value::as_str),
+            Some("0.0.0.0:8765")
+        );
         let _ = fs::remove_file(path);
     }
 }
