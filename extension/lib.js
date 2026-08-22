@@ -87,7 +87,7 @@
     try {
       info = await requestJson(fetchImpl, `${LOCAL_NODE_URL}/v1/pair/info`, { method: "GET" });
     } catch (_error) {
-      throw new Error("Local ura pairing is unavailable. Start `ura serve`, then run `ura pair`.");
+      throw new Error("Local ura pairing is unavailable. Start `ura daemon`, then run `ura pair`.");
     }
 
     const claim = await requestJson(fetchImpl, `${LOCAL_NODE_URL}/v1/pair/claim`, {
@@ -188,7 +188,7 @@
         throw new Error("Firefox is no longer authorized by the local ura node. Pair it again from options.");
       }
       if (error && error.networkError) {
-        throw new Error("Local ura node is unreachable. Start `ura serve` or the ura user service.");
+        throw new Error("Local ura node is unreachable. Start `ura daemon` or the ura user service.");
       }
       throw error;
     }
