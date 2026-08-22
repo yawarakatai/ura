@@ -8,10 +8,10 @@
   <body>
     <main>
       <form id="pairing-form">
-        <label>
-          Receiver address
-          <input id="receiver-address" name="receiverAddress" type="text" required>
-        </label>
+        <h1>Connect Firefox to ura</h1>
+        <p>
+          Start the local ura node, run <code>ura pair</code>, then enter the six-digit code here.
+        </p>
 
         <label>
           Pairing code
@@ -19,12 +19,7 @@
         </label>
 
         <label>
-          Receiver name
-          <input id="receiver-name" name="receiverName" type="text" required>
-        </label>
-
-        <label>
-          This device name
+          Browser name
           <input id="local-device-name" name="localDeviceName" type="text" required>
         </label>
 
@@ -36,14 +31,18 @@
           </select>
         </label>
 
-        <button type="submit">Pair</button>
+        <button type="submit">Connect</button>
         <p id="status" role="status"></p>
       </form>
 
       <section id="devices-section">
-        <h2>Devices</h2>
+        <h2>Playback device</h2>
         <p id="selected-device"></p>
         <div id="devices"></div>
+        <p>
+          Pair and remove remote ura nodes from the CLI. Device selection here is shared with
+          <code>ura device select</code>.
+        </p>
       </section>
     </main>
     <script src="lib.js"></script>
