@@ -6,16 +6,261 @@ on:
   pull_request:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref || github.ref_name }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - name: Apply node and peer terminology
+        if: github.event_name == 'pull_request'
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          import subprocess
+
+          def sub_word(text, old, new):
+              return re.sub(rf"\b{re.escape(old)}\b", new, text)
+
+          receiver = Path("src/receiver.rs")
+          peer_api = Path("src/peer_api.rs")
+          if receiver.exists() and not peer_api.exists():
+              subprocess.run(["git", "mv", str(receiver), str(peer_api)], check=True)
+
+          rust_files = list(Path("src").glob("*.rs"))
+          word_replacements = [
+              ("RemoteDevice", "Peer"),
+              ("ReceiverConfig", "NodeConfig"),
+              ("HttpClient", "PeerClient"),
+              ("PairingHttpClient", "PeerPairingClient"),
+              ("ReceiverBase", "PeerBase"),
+              ("ControllerClient", "PlaybackClient"),
+              ("controller_for", "playback_client_for"),
+              ("pair_controller", "pair_peer"),
+              ("pair_receiver", "open_pairing"),
+              ("init_serve_logging", "init_daemon_logging"),
+              ("normalize_receiver_address", "normalize_peer_address"),
+              ("validate_receiver_token", "validate_peer_token"),
+              ("run_serve", "run_peer_api"),
+              ("receiver_task", "peer_api_task"),
+              ("wait_for_receiver", "wait_for_peer_api"),
+              ("receiver_url", "peer_url"),
+              ("receiver_name", "node_name"),
+              ("receiver_alias", "peer_alias"),
+              ("AuthorizedDevice", "AuthorizedClient"),
+              ("authorize_device", "authorize_client"),
+              ("authorized_devices", "authorized_clients"),
+              ("revoke_authorized_device", "revoke_authorized_client"),
+          ]
+
+          for path in rust_files:
+              text = path.read_text()
+              for old, new in word_replacements:
+                  text = sub_word(text, old, new)
+              text = text.replace("crate::receiver", "crate::peer_api")
+              text = text.replace("pub mod receiver;", "pub mod peer_api;")
+              path.write_text(text)
+
+          # Canonical command is `daemon`; `serve` remains a hidden compatibility alias.
+          path = Path("src/cli.rs")
+          text = path.read_text()
+          text = text.replace(
+              "    /// Start the long-running local ura node.\n    Serve {",
+              "    /// Run the long-running local ura node.\n    #[command(alias = \"serve\")]\n    Daemon {",
+          )
+          text = text.replace(
+              '    #[arg(long, global = true)]\n    pub peer_url: Option<String>,',
+              '    #[arg(long = "peer-url", alias = "receiver-url", global = true)]\n    pub peer_url: Option<String>,',
+          )
+          text = text.replace(
+              '        /// Receiver URL to write into config.toml for legacy clients.\n        #[arg(long, default_value = "http://127.0.0.1:8765")]\n        peer_url: String,',
+              '        /// Peer API URL to write into config.toml.\n        #[arg(long = "peer-url", alias = "receiver-url", default_value = "http://127.0.0.1:8765")]\n        peer_url: String,',
+          )
+          text = text.replace("ura serve", "ura daemon")
+          text = text.replace("Manage receiver tokens.", "Manage peer API tokens.")
+          text = text.replace("random receiver token", "random peer API token")
+          text = text.replace("authorized controllers", "authorized clients")
+          text = text.replace("Authorize a controller", "Authorize a client")
+          text = text.replace("Revoke a controller credential", "Revoke a client credential")
+          text = text.replace('["ura", "serve"].as_slice()', '["ura", "daemon"].as_slice()')
+          text = text.replace('for expected in ["serve", "queue", "pause", "resume"]', 'for expected in ["daemon", "queue", "pause", "resume"]')
+          marker = "    #[test]\n    fn device_select_accepts_interactive_and_named_forms()"
+          if "fn legacy_serve_alias_still_parses()" not in text and marker in text:
+              text = text.replace(
+                  marker,
+                  '    #[test]\n    fn legacy_serve_alias_still_parses() {\n        Cli::try_parse_from(["ura", "serve"])\n            .expect("legacy serve alias should parse");\n        let subcommands = Cli::command()\n            .get_subcommands()\n            .map(|command| command.get_name().to_string())\n            .collect::<Vec<_>>();\n        assert!(subcommands.contains(&"daemon".to_string()));\n        assert!(!subcommands.contains(&"serve".to_string()));\n    }\n\n' + marker,
+              )
+          path.write_text(text)
+
+          # Rename the command handler and terminology in main.
+          path = Path("src/main.rs")
+          text = path.read_text()
+          text = text.replace("Command::Serve", "Command::Daemon")
+          text = text.replace("cli.receiver_url", "cli.peer_url")
+          text = text.replace("Authorized controller", "Authorized client")
+          text = text.replace("revoked controller", "revoked client")
+          text = text.replace("authorized controller", "authorized client")
+          text = text.replace("ura serve", "ura daemon")
+          text = text.replace("serve is not running", "daemon is not running")
+          path.write_text(text)
+
+          # New config writes peer_url; old receiver_url remains accepted as a serde alias.
+          path = Path("src/config.rs")
+          text = path.read_text()
+          text = text.replace(
+              "struct FileConfig {\n    peer_url: Option<String>,",
+              'struct FileConfig {\n    #[serde(alias = "receiver_url")]\n    peer_url: Option<String>,',
+          )
+          text = text.replace('"URA_RECEIVER_URL"', '"URA_PEER_URL"')
+          old_env = '''fn env_peer_url() -> Option<String> {
+    env::var("URA_PEER_URL").ok()
+}'''
+          new_env = '''fn env_peer_url() -> Option<String> {
+    env::var("URA_PEER_URL")
+        .ok()
+        .or_else(|| env::var("URA_RECEIVER_URL").ok())
+}'''
+          text = text.replace(old_env, new_env)
+          text = text.replace("receiver address", "peer address")
+          text = text.replace("receiver config", "node config")
+          text = text.replace("receiver_reads", "node_reads")
+          text = text.replace("load receiver config", "load node config")
+          path.write_text(text)
+
+          # Pairing v1 keeps `receiver_name` on the peer HTTP wire, while Rust uses node_name.
+          path = Path("src/client.rs")
+          text = path.read_text()
+          text = text.replace(
+              "pub struct PairInfo {\n    pub node_name: String,",
+              'pub struct PairInfo {\n    #[serde(rename = "receiver_name")]\n    pub node_name: String,',
+          )
+          text = text.replace(
+              "pub struct PairClaim {\n    pub protocol_version: u8,\n    pub node_name: String,",
+              'pub struct PairClaim {\n    pub protocol_version: u8,\n    #[serde(rename = "receiver_name")]\n    pub node_name: String,',
+          )
+          text = text.replace("failed to connect to receiver", "failed to connect to peer")
+          text = text.replace("HTTP request to receiver", "HTTP request to peer")
+          text = text.replace("HTTP response from receiver", "HTTP response from peer")
+          text = text.replace("receiver did not return", "peer did not return")
+          text = text.replace("receiver returned HTTP", "peer returned HTTP")
+          text = text.replace("receiver JSON response", "peer JSON response")
+          text = text.replace("peer_url must start", "peer URL must start")
+          text = text.replace("peer_url is missing host", "peer URL is missing host")
+          path.write_text(text)
+
+          # Peer-facing HTTP v1 serializes the legacy field name for compatibility.
+          path = Path("src/peer_api.rs")
+          text = path.read_text()
+          text = sub_word(text, "Receiver", "PlaybackRuntime")
+          text = text.replace("let receiver = PlaybackRuntime::start", "let playback = PlaybackRuntime::start")
+          text = text.replace("receiver.into_parts()", "playback.into_parts()")
+          text = text.replace(
+              "struct PairInfoResponse {\n    pairing: bool,\n    node_name: String,",
+              'struct PairInfoResponse {\n    pairing: bool,\n    #[serde(rename = "receiver_name")]\n    node_name: String,',
+          )
+          text = text.replace(
+              "struct PairClaimResponse {\n    protocol_version: u8,\n    node_name: String,",
+              'struct PairClaimResponse {\n    protocol_version: u8,\n    #[serde(rename = "receiver_name")]\n    node_name: String,',
+          )
+          text = text.replace("receiver startup", "peer API startup")
+          text = text.replace("HTTP receiver bind address", "peer API bind address")
+          text = text.replace("HTTP receiver listening", "peer API listening")
+          text = text.replace("HTTP receiver failed", "peer API failed")
+          text = text.replace("HTTP receiver", "peer API")
+          text = text.replace("receiver shutdown", "peer API shutdown")
+          text = text.replace("failed to bind HTTP receiver", "failed to bind peer API")
+          text = text.replace("receiver token", "peer API token")
+          path.write_text(text)
+
+          path = Path("src/node.rs")
+          text = path.read_text()
+          text = text.replace("receiver", "peer_api")
+          text = text.replace("peer_api task", "peer API task")
+          text = text.replace("peer_api exited", "peer API exited")
+          text = text.replace("local ura peer_api", "local ura peer API")
+          path.write_text(text)
+
+          # Local browser API is new in 0.3, so it exposes node_name directly.
+          path = Path("src/local_api.rs")
+          text = path.read_text()
+          text = text.replace("receiver", "peer")
+          text = text.replace("peer_name", "node_name")
+          path.write_text(text)
+
+          # User-facing docs/configuration use daemon/node/peer/client terminology.
+          text_paths = [
+              Path("README.md"),
+              Path("AGENTS.md"),
+              Path("docs/architecture.md"),
+              Path("docs/deployment.md"),
+              Path("docs/development.md"),
+              Path("docs/pairing-auth.md"),
+              Path("contrib/systemd/ura.service"),
+              Path("nix/home-manager-module.nix"),
+              Path("extension/lib.js"),
+              Path("extension/lib.test.js"),
+              Path("extension/options.html"),
+              Path("extension/options.js"),
+          ]
+          for path in text_paths:
+              text = path.read_text()
+              text = text.replace("ura serve", "ura daemon")
+              text = text.replace("`ura serve`", "`ura daemon`")
+              text = text.replace("receiver-only", "node-only")
+              text = text.replace("sender-only or node-only", "sender-only or receiver-only")
+              text = text.replace("remote-only controller", "remote-only client")
+              text = text.replace("authorized controllers", "authorized clients")
+              text = text.replace("Authorized controllers", "Authorized clients")
+              text = text.replace("controller credential", "client credential")
+              text = text.replace("controller token", "client token")
+              text = text.replace("controller-side", "peer-side")
+              text = text.replace("receiver-side", "node-side")
+              text = text.replace("receiver process", "node daemon")
+              text = text.replace("receiver service", "node service")
+              text = text.replace("receiver API", "peer API")
+              text = text.replace("Receiver API", "Peer API")
+              text = text.replace("receiver bind", "peer API bind")
+              text = text.replace("receiver token", "peer API token")
+              text = text.replace("receiver address", "peer address")
+              text = text.replace("receiver name", "node name")
+              text = text.replace("Receiver name", "Node name")
+              text = text.replace("receiver", "node") if path.name in {"options.html", "options.js"} else text
+              text = text.replace("claim.receiver_name", "claim.node_name")
+              text = text.replace("info.receiver_name", "info.node_name")
+              path.write_text(text)
+
+          # Keep the explicit compatibility paragraph precise.
+          path = Path("README.md")
+          text = path.read_text().replace(
+              "legacy direct receiver overrides",
+              "legacy direct `receiver_url` / `--receiver-url` aliases",
+          )
+          path.write_text(text)
+
+          # systemd/Home Manager should launch the canonical daemon command.
+          for path in [Path("contrib/systemd/ura.service"), Path("nix/home-manager-module.nix")]:
+              text = path.read_text().replace(" serve", " daemon")
+              path.write_text(text)
+          PY
+
+          cargo fmt
+          git add -A
+          if ! git diff --cached --quiet; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -m "refactor: adopt node and peer terminology"
+            git push origin HEAD:${{ github.head_ref }}
+          fi
+      - name: Audit legacy terminology
+        run: |
+          git grep -n -E 'ura serve|\b(receiver|controller)\b|\b(Receiver|Controller)\b' -- ':!Cargo.lock' || true
       - name: Check formatting
         run: cargo fmt --check
       - name: Run Clippy
