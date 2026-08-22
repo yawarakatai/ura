@@ -30,35 +30,33 @@ function response(status, body) {
   };
 }
 
-test("migrates legacy single-device settings without deleting old settings", async () => {
-  const store = storage({
-    receiverUrl: "192.168.1.23",
-    token: "secret-token",
-    defaultAction: "enqueue",
+test("migrates a legacy localhost token without migrating remote receiver tokens", async () => {
+  const local = storage({
+    receiverUrl: "http://127.0.0.1:8765",
+    token: "local-token",
+  });
+  const remote = storage({
+    receiverUrl: "http://192.168.1.23:8765",
+    token: "remote-token",
   });
 
-  const settings = await ura.loadSettings(store);
-
-  assert.equal(settings.selectedDevice, "default");
-  assert.deepEqual(settings.devices, [
-    { name: "default", url: "http://192.168.1.23:8765", token: "secret-token" },
-  ]);
-  assert.equal(store.state.receiverUrl, "192.168.1.23");
-  assert.equal(store.state.token, "secret-token");
+  assert.equal((await ura.loadSettings(local)).nodeToken, "local-token");
+  assert.equal(local.state.nodeToken, "local-token");
+  assert.equal((await ura.loadSettings(remote)).nodeToken, "");
 });
 
-test("normalizes receiver addresses", () => {
-  assert.equal(ura.normalizeReceiverAddress("192.168.1.23"), "http://192.168.1.23:8765");
-  assert.equal(ura.normalizeReceiverAddress("192.168.1.23:9999"), "http://192.168.1.23:9999");
-  assert.equal(ura.normalizeReceiverAddress("http://192.168.1.23"), "http://192.168.1.23:8765");
-  assert.equal(ura.normalizeReceiverAddress("kamo.local"), "http://kamo.local:8765");
-  assert.throws(() => ura.normalizeReceiverAddress("https://kamo"), /Unsupported/);
-  assert.throws(() => ura.normalizeReceiverAddress("http://kamo/path"), /path/);
-  assert.throws(() => ura.normalizeReceiverAddress("http://kamo?x=1"), /query/);
-  assert.throws(() => ura.normalizeReceiverAddress("http://user:kamo@host"), /username/);
+test("migrates a localhost token from the old multi-device settings", async () => {
+  const store = storage({
+    devices: [
+      { name: "living", url: "http://192.168.1.20:8765", token: "remote" },
+      { name: "desktop", url: "http://localhost:8765", token: "local" },
+    ],
+  });
+
+  assert.equal((await ura.loadSettings(store)).nodeToken, "local");
 });
 
-test("successful pairing stores and selects a receiver without returning the token", async () => {
+test("connecting Firefox pairs only with the local ura node", async () => {
   const store = storage();
   const calls = [];
   const fetchImpl = async (url, options) => {
@@ -73,135 +71,135 @@ test("successful pairing stores and selects a receiver without returning the tok
     });
   };
 
-  const result = await ura.pairDevice({
+  const result = await ura.connectLocalNode({
     storage: store,
     fetchImpl,
-    address: "kamo.local",
     code: "012345",
-    receiverName: "kamo",
-    localDeviceName: "Firefox on desuwa",
+    localDeviceName: "Firefox on kamo",
+    defaultAction: "queue",
   });
 
-  assert.deepEqual(result, { name: "kamo", url: "http://kamo.local:8765" });
-  assert.equal(store.state.selectedDevice, "kamo");
-  assert.equal(store.state.devices[0].token, "returned-secret-token");
-  assert.equal(calls[1].options.body, '{"code":"012345","device_name":"Firefox on desuwa"}');
+  assert.deepEqual(result, { nodeName: "kamo" });
+  assert.equal(store.state.nodeToken, "returned-secret-token");
+  assert.equal(store.state.defaultAction, "queue");
+  assert.equal(calls[0].url, `${ura.LOCAL_NODE_URL}/v1/pair/info`);
+  assert.equal(calls[1].url, `${ura.LOCAL_NODE_URL}/v1/pair/claim`);
+  assert.equal(calls[1].options.body, '{"code":"012345","device_name":"Firefox on kamo"}');
+  assert.equal(JSON.stringify(result).includes("returned-secret-token"), false);
 });
 
-test("rejects invalid pairing code", async () => {
+test("rejects invalid pairing code before making a request", async () => {
+  let called = false;
   await assert.rejects(
     () =>
-      ura.pairDevice({
+      ura.connectLocalNode({
         storage: storage(),
-        fetchImpl: async () => response(200, {}),
-        address: "kamo",
+        fetchImpl: async () => {
+          called = true;
+          return response(200, {});
+        },
         code: "12345",
-        receiverName: "kamo",
         localDeviceName: "Firefox",
       }),
     /six decimal digits/,
   );
+  assert.equal(called, false);
 });
 
-test("rejects duplicate device name before claiming", async () => {
+test("loads playback devices from the local node", async () => {
+  const store = storage({ nodeToken: "node-token" });
   const calls = [];
-  await assert.rejects(
-    () =>
-      ura.pairDevice({
-        storage: storage({
-          devices: [{ name: "kamo", url: "http://kamo:8765", token: "secret" }],
-        }),
-        fetchImpl: async (url) => {
-          calls.push(url);
-          return response(200, { pairing: true });
-        },
-        address: "kamo",
-        code: "123456",
-        receiverName: "kamo",
-        localDeviceName: "Firefox",
-      }),
-    /Duplicate receiver name/,
-  );
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0], "http://kamo:8765/v1/pair/info");
-});
-
-test("selects a device", async () => {
-  const store = storage({
+  const deviceSet = {
+    selected: "living",
     devices: [
-      { name: "kamo", url: "http://kamo:8765", token: "kamo-token" },
-      { name: "dane", url: "http://dane:8765", token: "dane-token" },
+      { name: "desktop", kind: "this_device", address: null },
+      { name: "living", kind: "peer", address: "http://192.168.1.42:8765" },
     ],
-  });
-  await ura.selectDevice(store, "dane");
-  assert.equal(store.state.selectedDevice, "dane");
-});
+  };
 
-test("removing the selected device clears selection", async () => {
-  const store = storage({
-    selectedDevice: "kamo",
-    devices: [
-      { name: "kamo", url: "http://kamo:8765", token: "kamo-token" },
-      { name: "dane", url: "http://dane:8765", token: "dane-token" },
-    ],
-  });
-  await ura.removeDevice(store, "kamo");
-  assert.equal(store.state.selectedDevice, "");
-  assert.deepEqual(
-    store.state.devices.map((device) => device.name),
-    ["dane"],
-  );
-});
-
-test("toolbar request uses the selected device", async () => {
-  const requests = [];
-  await ura.sendTabToSelectedDevice({
-    storage: storage({
-      selectedDevice: "dane",
-      defaultAction: "queue",
-      devices: [
-        { name: "kamo", url: "http://kamo:8765", token: "kamo-token" },
-        { name: "dane", url: "http://dane:9999", token: "dane-token" },
-      ],
-    }),
+  const result = await ura.loadDevices({
+    storage: store,
     fetchImpl: async (url, options) => {
-      requests.push({ url, options });
+      calls.push({ url, options });
+      return response(200, deviceSet);
+    },
+  });
+
+  assert.deepEqual(result, deviceSet);
+  assert.equal(calls[0].url, `${ura.LOCAL_NODE_URL}/v1/devices`);
+  assert.equal(calls[0].options.headers.Authorization, "Bearer node-token");
+});
+
+test("selecting a device updates the local ura node rather than extension storage", async () => {
+  const store = storage({ nodeToken: "node-token" });
+  const calls = [];
+
+  const selected = await ura.selectDevice({
+    storage: store,
+    fetchImpl: async (url, options) => {
+      calls.push({ url, options });
+      return response(200, { selected: "living" });
+    },
+    name: "living",
+  });
+
+  assert.equal(selected, "living");
+  assert.equal(calls[0].url, `${ura.LOCAL_NODE_URL}/v1/select`);
+  assert.equal(calls[0].options.body, '{"name":"living"}');
+  assert.equal(store.state.selectedDevice, undefined);
+});
+
+test("toolbar request follows the device selected by the local node", async () => {
+  const store = storage({
+    nodeToken: "node-token",
+    defaultAction: "queue",
+  });
+  const calls = [];
+
+  const result = await ura.sendTabToSelectedDevice({
+    storage: store,
+    fetchImpl: async (url, options) => {
+      calls.push({ url, options });
+      if (url.endsWith("/v1/devices")) {
+        return response(200, {
+          selected: "living",
+          devices: [{ name: "living", kind: "peer", address: "http://living:8765" }],
+        });
+      }
       return response(200, { ok: true });
     },
     tabUrl: "https://youtu.be/example",
   });
 
-  assert.equal(requests[0].url, "http://dane:9999/v1/enqueue");
-  assert.equal(requests[0].options.headers.Authorization, "Bearer dane-token");
+  assert.deepEqual(result, { action: "enqueue", deviceName: "living" });
+  assert.equal(calls[0].url, `${ura.LOCAL_NODE_URL}/v1/devices`);
+  assert.equal(calls[1].url, `${ura.LOCAL_NODE_URL}/v1/enqueue`);
+  assert.equal(calls[1].options.headers.Authorization, "Bearer node-token");
+  assert.equal(calls[1].options.body, '{"url":"https://youtu.be/example","source":"browser-extension"}');
 });
 
-test("no selected device produces a useful error", async () => {
+test("missing local authorization produces a useful error", async () => {
   await assert.rejects(
     () =>
       ura.sendTabToSelectedDevice({
-        storage: storage({
-          devices: [{ name: "kamo", url: "http://kamo:8765", token: "kamo-token" }],
-        }),
+        storage: storage(),
         fetchImpl: async () => response(200, {}),
         tabUrl: "https://youtu.be/example",
       }),
-    /No receiver selected/,
+    /not connected to the local ura node/,
   );
 });
 
-test("tokens are not returned for rendering or error messages", async () => {
-  const paired = await ura.pairDevice({
-    storage: storage(),
-    fetchImpl: async (url) =>
-      url.endsWith("/info")
-        ? response(200, { pairing: true })
-        : response(200, { protocol_version: 1, token: "hidden-secret-token" }),
-    address: "kamo",
-    code: "123456",
-    receiverName: "kamo",
-    localDeviceName: "Firefox",
-  });
-
-  assert.equal(JSON.stringify(paired).includes("hidden-secret-token"), false);
-  assert.equal(ura.displayHost("http://kamo:8765").includes("hidden-secret-token"), false);
+test("network failures tell the user to start the local node", async () => {
+  await assert.rejects(
+    () =>
+      ura.sendTabToSelectedDevice({
+        storage: storage({ nodeToken: "node-token" }),
+        fetchImpl: async () => {
+          throw new Error("connection refused");
+        },
+        tabUrl: "https://youtu.be/example",
+      }),
+    /Start `ura serve` or the ura user service/,
+  );
 });
