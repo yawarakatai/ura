@@ -18,65 +18,139 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: Apply reviewed terminology fixes
+      - name: Apply final naming cleanup
         if: github.ref_name == 'feat/node-destinations' || github.head_ref == 'feat/node-destinations'
         run: |
           python3 - <<'PY'
           from pathlib import Path
+          import re
 
           def replace(pathname, old, new):
               path = Path(pathname)
               text = path.read_text()
               if old in text:
-                  text = text.replace(old, new)
-                  path.write_text(text)
+                  path.write_text(text.replace(old, new))
 
-          # Keep the Rust command name aligned with the public command.
-          replace("src/cli.rs", '    #[command(name = "daemon", alias = "serve")]\n    Serve {', '    #[command(alias = "serve")]\n    Daemon {')
-          replace("src/main.rs", "Command::Serve { bind }", "Command::Daemon { bind }")
-
-          # Canonical CLI field names; old spellings remain clap aliases.
-          replace("src/cli.rs", "pub receiver_url: Option<String>", "pub peer_url: Option<String>")
-          replace("src/main.rs", "cli.receiver_url", "cli.peer_url")
-          replace("src/cli.rs", "        receiver_url: String,", "        peer_url: String,")
-          replace("src/main.rs", "                receiver_url,\n                bind,", "                peer_url,\n                bind,")
-          replace("src/main.rs", "                    receiver_url,\n                    bind,", "                    receiver_url: peer_url,\n                    bind,")
-
-          # Pairing option names describe nodes rather than the old controller/receiver roles.
-          replace(
-              "src/cli.rs",
-              "        /// This node's name stored on the peer.\n        #[arg(long)]\n        device_name: Option<String>,",
-              "        /// This node's name stored on the peer.\n        #[arg(long = \"node-name\", alias = \"device-name\")]\n        node_name: Option<String>,",
+          # `peer_url` is canonical in 0.3 configs. The old key remains a
+          # serde alias, so existing 0.2 configs continue to load unchanged.
+          path = Path("src/config.rs")
+          text = path.read_text().replace("receiver_url", "peer_url")
+          text = text.replace(
+              "struct FileConfig {\n    peer_url: Option<String>,",
+              'struct FileConfig {\n    #[serde(alias = "receiver_url")]\n    peer_url: Option<String>,',
           )
-          replace("src/main.rs", "            device_name,\n            name,", "            node_name,\n            name,")
-          replace("src/main.rs", "                device_name,\n                name,", "                node_name,\n                name,")
-          replace("src/main.rs", "    device_name: Option<String>,\n    name: Option<String>,", "    node_name: Option<String>,\n    name: Option<String>,")
-          replace("src/main.rs", "let local_name = match device_name {", "let local_name = match node_name {")
+          # Preserve the old environment variable as a fallback after making
+          # URA_PEER_URL canonical.
+          text = text.replace(
+              'fn env_peer_url() -> Option<String> {\n    env::var("URA_PEER_URL")\n        .ok()\n        .or_else(|| env::var("URA_RECEIVER_URL").ok())\n}',
+              'fn env_peer_url() -> Option<String> {\n    env::var("URA_PEER_URL")\n        .ok()\n        .or_else(|| env::var("URA_RECEIVER_URL").ok())\n}',
+          )
+          legacy_test_marker = "    #[test]\n    fn cli_overrides_config_file()"
+          if "fn loads_legacy_receiver_url_key()" not in text and legacy_test_marker in text:
+              legacy_test = r'''    #[test]
+              fn loads_legacy_receiver_url_key() {
+                  let path = unique_path("legacy-receiver-url");
+                  fs::write(
+                      &path,
+                      r#"
+          receiver_url = "http://127.0.0.1:8765"
+          token = "secret"
+          "#,
+                  )
+                  .expect("write legacy config");
 
-          # Fix references exposed by the cross-file type rename.
-          replace("src/main.rs", "info.receiver_name", "info.node_name")
-          replace("src/node.rs", "receiver::run_peer_api", "peer_api::run_peer_api")
-          replace("src/peer_api.rs", "oneshot::PlaybackRuntime", "oneshot::Receiver")
-          replace("src/peer_api.rs", "before starting the receiver", "before starting the node")
-          replace("src/config.rs", "invalid receiver address host", "invalid peer address host")
+                  let config = load_config_from_path_with_overrides(&path, None, None)
+                      .expect("load legacy config");
+                  assert_eq!(config.peer_url, "http://127.0.0.1:8765");
 
-          # Canonical examples and browser errors use daemon.
-          for pathname in [
-              "README.md",
-              "AGENTS.md",
-              "docs/architecture.md",
-              "docs/deployment.md",
-              "docs/development.md",
-              "docs/pairing-auth.md",
-              "extension/lib.js",
-              "extension/lib.test.js",
-              "extension/options.html",
-              "extension/options.js",
-              "contrib/systemd/ura.service",
-              "nix/home-manager-module.nix",
-          ]:
-              replace(pathname, "ura serve", "ura daemon")
-              replace(pathname, "cargo run -- serve", "cargo run -- daemon")
+                  let _ = fs::remove_file(path);
+              }
+
+          '''
+              text = text.replace(legacy_test_marker, legacy_test + legacy_test_marker)
+          path.write_text(text)
+
+          # Keep the direct compatibility client aligned with Config::peer_url.
+          replace("src/main.rs", "config.receiver_url", "config.peer_url")
+          replace("src/main.rs", "receiver_url: peer_url", "peer_url")
+
+          # Internal legacy destination naming becomes explicitly peer-oriented.
+          for pathname in ["src/config.rs", "src/node.rs"]:
+              path = Path(pathname)
+              text = re.sub(r"\blegacy_device\b", "legacy_peer", path.read_text())
+              text = re.sub(r"\bis_loopback_receiver_url\b", "is_loopback_peer_url", text)
+              path.write_text(text)
+          replace(
+              "src/node.rs",
+              '        table.remove("receiver_url");',
+              '        table.remove("receiver_url");\n        table.remove("peer_url");',
+          )
+
+          # Peer transport implementation uses peer_url throughout. Pairing-v1
+          # `receiver_name` is intentionally untouched because it is a wire key.
+          path = Path("src/client.rs")
+          text = path.read_text().replace("receiver_url", "peer_url")
+          text = text.replace("peer_url must start with http://", "peer URL must start with http://")
+          text = text.replace("peer_url is missing host", "peer URL is missing host")
+          text = text.replace("invalid HTTP status from receiver", "invalid HTTP status from peer")
+          text = text.replace("parses_receiver_base_url", "parses_peer_base_url")
+          text = text.replace("rejects_non_http_receiver_url", "rejects_non_http_peer_url")
+          text = text.replace("parse receiver URL", "parse peer URL")
+          text = text.replace("https receiver URL should fail", "https peer URL should fail")
+          text = text.replace("bind test receiver", "bind test peer")
+          text = text.replace("read test receiver address", "read test peer address")
+          text = text.replace("join test receiver", "join test peer")
+          path.write_text(text)
+
+          # Authorization is a client relationship (Firefox, CLI, peer node),
+          # while the existing SQLite table name remains unchanged on disk.
+          rust_files = list(Path("src").glob("*.rs"))
+          for path in rust_files:
+              text = path.read_text()
+              text = re.sub(r"\bAuthorizedDevice\b", "AuthorizedClient", text)
+              text = re.sub(r"\bauthorize_device\b", "authorize_client", text)
+              text = text.replace(".authorized_devices()", ".authorized_clients()")
+              text = text.replace("fn authorized_devices(", "fn authorized_clients(")
+              text = text.replace(".revoke_authorized_device(", ".revoke_authorized_client(")
+              text = text.replace("fn revoke_authorized_device(", "fn revoke_authorized_client(")
+              path.write_text(text)
+
+          replace("src/peer_api.rs", "duplicate authorized device", "duplicate authorized client")
+          replace("src/peer_api.rs", "authorized device", "authorized client")
+
+          # Prefer the new pair option in examples/tests; the old spelling is a clap alias.
+          replace("src/cli.rs", '"--device-name",\n                "desuwa",', '"--node-name",\n                "desuwa",')
+          replace("docs/pairing-auth.md", "--device-name desktop", "--node-name desktop")
+
+          # User-facing prose uses the new vocabulary. Legacy wire/config names
+          # remain only where the docs explicitly describe compatibility.
+          path = Path("docs/architecture.md")
+          text = path.read_text()
+          text = text.replace("a controller-only invocation", "a client-only invocation")
+          text = text.replace("authorized-device token hashes", "authorized-client token hashes")
+          text = text.replace("Successful authorized-device authentication", "Successful authorized-client authentication")
+          text = text.replace("legacy configured receiver token", "legacy configured peer API token")
+          text = text.replace("The receiver backend keeps", "The local playback backend keeps")
+          path.write_text(text)
+
+          path = Path("docs/pairing-auth.md")
+          text = path.read_text()
+          text = text.replace("authorized-device token", "authorized-client token")
+          text = text.replace("authorized-device names", "authorized-client names")
+          text = text.replace("active authorized-device token hashes", "active authorized-client token hashes")
+          text = text.replace("legacy configured receiver token", "legacy configured peer API token")
+          text = text.replace("legacy receiver token", "legacy peer API token")
+          text = text.replace("Old remote-receiver tokens", "Old remote peer tokens")
+          path.write_text(text)
+
+          for pathname in ["AGENTS.md", "docs/deployment.md", "docs/development.md"]:
+              path = Path(pathname)
+              text = path.read_text()
+              text = text.replace("controller-only", "client-only")
+              text = text.replace("receiver backend", "local playback backend")
+              text = text.replace("receiver token", "peer API token")
+              text = text.replace("authorized device", "authorized client")
+              path.write_text(text)
           PY
 
           cargo fmt
@@ -84,7 +158,7 @@ jobs:
           if ! git diff --cached --quiet; then
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git commit -m "fix: complete node terminology migration"
+            git commit -m "refactor: make peer and client names canonical"
             git push origin HEAD:${{ github.head_ref || github.ref_name }}
           fi
       - name: Check formatting
