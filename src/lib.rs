@@ -7,5 +7,5 @@ pub mod local_api;
 pub mod mpv;
 pub mod node;
 pub mod pairing;
-pub mod receiver;
+pub mod peer_api;
 pub mod selector;

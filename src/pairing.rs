@@ -18,11 +18,11 @@ pub struct PairingManager {
 }
 
 impl PairingManager {
-    pub fn new(receiver_name: String) -> Self {
+    pub fn new(node_name: String) -> Self {
         let (completion_tx, _) = watch::channel(PairingCompletion::Inactive);
         Self {
             state: Mutex::new(PairingState {
-                receiver_name,
+                node_name,
                 session: None,
                 completion: PairingCompletion::Inactive,
             }),
@@ -128,7 +128,7 @@ impl PairingManager {
 
 #[derive(Debug)]
 struct PairingState {
-    receiver_name: String,
+    node_name: String,
     session: Option<PairingSession>,
     completion: PairingCompletion,
 }
@@ -150,7 +150,7 @@ impl PairingState {
             return PairingStatus::Inactive;
         };
         PairingStatus::Active {
-            receiver_name: self.receiver_name.clone(),
+            node_name: self.node_name.clone(),
             expires_in: session.expires_in(Instant::now()),
             remaining_attempts: session.remaining_attempts,
         }
@@ -189,7 +189,7 @@ pub struct PairingStart {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PairingStatus {
     Active {
-        receiver_name: String,
+        node_name: String,
         expires_in: u64,
         remaining_attempts: u8,
     },

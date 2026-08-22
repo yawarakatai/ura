@@ -21,21 +21,21 @@ use tokio::{
 use tracing::{info, warn};
 
 use crate::{
-    client::HttpClient,
+    client::PeerClient,
     config::{
-        DeviceConfig, RemoteDevice, config_path, default_device_name, generate_token,
-        normalize_receiver_address,
+        DeviceConfig, Peer, config_path, default_device_name, generate_token,
+        normalize_peer_address,
     },
     db::HistoryEntry,
     local_api::run_local_api,
     mpv::{LoopStatus, MpvStatus},
-    receiver::run_serve,
+    receiver::run_peer_api,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Destination {
     SelfNode { name: String },
-    Peer(RemoteDevice),
+    Peer(Peer),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -219,8 +219,8 @@ pub async fn run_node(
     });
 
     info!("node startup");
-    let mut receiver_task = tokio::spawn(run_serve(bind, Some(local_token)));
-    wait_for_receiver(bind, &mut receiver_task).await?;
+    let mut peer_api_task = tokio::spawn(run_peer_api(bind, Some(local_token)));
+    wait_for_peer_api(bind, &mut peer_api_task).await?;
 
     let (node_shutdown, node_shutdown_rx) = oneshot::channel();
     let mut node_shutdown = Some(node_shutdown);
@@ -235,14 +235,14 @@ pub async fn run_node(
     let mut local_api_task = tokio::spawn(run_local_api(local_url, local_api_shutdown_rx));
 
     tokio::select! {
-        result = &mut receiver_task => {
+        result = &mut peer_api_task => {
             if let Some(shutdown) = node_shutdown.take() {
                 let _ = shutdown.send(());
             }
             if let Some(shutdown) = local_api_shutdown.take() {
                 let _ = shutdown.send(());
             }
-            flatten_task_result(result, "receiver")?;
+            flatten_task_result(result, "peer API")?;
             flatten_task_result(node_task.await, "node control socket")?;
             flatten_task_result(local_api_task.await, "local control API")?;
             Ok(())
@@ -252,7 +252,7 @@ pub async fn run_node(
                 let _ = shutdown.send(());
             }
             flatten_task_result(result, "node control socket")?;
-            receiver_task.abort();
+            peer_api_task.abort();
             let _ = local_api_task.await;
             Ok(())
         }
@@ -261,32 +261,32 @@ pub async fn run_node(
                 let _ = shutdown.send(());
             }
             flatten_task_result(result, "local control API")?;
-            receiver_task.abort();
+            peer_api_task.abort();
             let _ = node_task.await;
             Ok(())
         }
     }
 }
 
-async fn wait_for_receiver(
+async fn wait_for_peer_api(
     bind: SocketAddr,
-    receiver_task: &mut tokio::task::JoinHandle<Result<()>>,
+    peer_api_task: &mut tokio::task::JoinHandle<Result<()>>,
 ) -> Result<()> {
     let address = local_address_for_bind(bind);
     for _ in 0..100 {
-        if receiver_task.is_finished() {
-            let result = (&mut *receiver_task)
+        if peer_api_task.is_finished() {
+            let result = (&mut *peer_api_task)
                 .await
-                .map_err(|error| anyhow::anyhow!("receiver task failed: {error}"))?;
+                .map_err(|error| anyhow::anyhow!("peer API task failed: {error}"))?;
             result?;
-            anyhow::bail!("receiver exited during node startup");
+            anyhow::bail!("peer API exited during node startup");
         }
         if tokio::net::TcpStream::connect(address).await.is_ok() {
             return Ok(());
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    anyhow::bail!("timed out waiting for the local ura receiver at {address}")
+    anyhow::bail!("timed out waiting for the local ura peer API at {address}")
 }
 
 fn flatten_task_result(
@@ -394,7 +394,7 @@ async fn dispatch(request: NodeRequest, runtime: &NodeRuntime) -> Result<NodeRes
 async fn route<T, F>(runtime: &NodeRuntime, to: Option<String>, operation: F) -> Result<T>
 where
     T: Send + 'static,
-    F: FnOnce(HttpClient) -> Result<T> + Send + 'static,
+    F: FnOnce(PeerClient) -> Result<T> + Send + 'static,
 {
     let destination = resolve_destination(runtime.config_path.as_deref(), to.as_deref())?;
     let (url, token) = match destination {
@@ -402,7 +402,7 @@ where
         Destination::Peer(peer) => (peer.url, peer.token),
     };
     tokio::task::spawn_blocking(move || {
-        let client = HttpClient::new(url, token)?;
+        let client = PeerClient::new(url, token)?;
         operation(client)
     })
     .await
@@ -519,9 +519,9 @@ pub fn add_peer(
     if config.devices.iter().any(|device| device.name == name) {
         anyhow::bail!("device `{name}` already exists");
     }
-    config.devices.push(RemoteDevice {
+    config.devices.push(Peer {
         name: name.to_string(),
-        url: normalize_receiver_address(address)?,
+        url: normalize_peer_address(address)?,
         token: token.to_string(),
     });
     persist_device_config(config_path_override, &config)
@@ -547,9 +547,9 @@ pub fn add_paired_peer(
         anyhow::bail!("device `{peer_name}` already exists");
     }
     config.local_name = Some(local_name.to_string());
-    config.devices.push(RemoteDevice {
+    config.devices.push(Peer {
         name: peer_name.to_string(),
-        url: normalize_receiver_address(address)?,
+        url: normalize_peer_address(address)?,
         token: token.to_string(),
     });
     if select {

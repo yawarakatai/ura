@@ -84,7 +84,7 @@ authorized once against the local ura node.
 Setup is:
 
 ```bash
-ura serve
+ura daemon
 ura pair
 ```
 

@@ -111,7 +111,7 @@
     await clearLegacySettings(storage);
 
     return {
-      nodeName: claim.receiver_name || info.receiver_name || "local ura",
+      nodeName: claim.node_name || info.node_name || "local ura",
     };
   }
 

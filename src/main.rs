@@ -10,10 +10,10 @@ use clap::Parser;
 use serde::{Deserialize, Serialize};
 use ura::{
     cli::{Cli, Command, ConfigCommand, DeviceCommand, LoopCommand, TokenCommand},
-    client::{HttpClient, PairingHttpClient},
+    client::{PeerClient, PeerPairingClient},
     config::{
-        Config, ConfigInit, DeviceConfig, ReceiverConfig, default_control_socket_path,
-        default_db_path, default_device_name, generate_token, normalize_receiver_address,
+        Config, ConfigInit, DeviceConfig, NodeConfig, default_control_socket_path, default_db_path,
+        default_device_name, generate_token, normalize_peer_address,
     },
     db::{Database, HistoryEntry, authorize_device},
     mpv::{LoopStatus, MpvStatus},
@@ -33,7 +33,7 @@ async fn main() -> Result<()> {
         Command::Serve { bind } => {
             init_daemon_logging();
             let config_path = cli.config.clone();
-            let config = ReceiverConfig::load_with_overrides(cli.config, bind, cli.token)?;
+            let config = NodeConfig::load_with_overrides(cli.config, bind, cli.token)?;
             run_node(config.bind, config.token, config_path).await
         }
         Command::Play { to, url } => {
@@ -195,7 +195,8 @@ async fn main() -> Result<()> {
             }
         },
         Command::Status { to } => {
-            let status = playback_client_for(cli.config, cli.receiver_url, cli.token, to)?.status()?;
+            let status =
+                playback_client_for(cli.config, cli.receiver_url, cli.token, to)?.status()?;
             print_status(&status);
             Ok(())
         }
@@ -213,7 +214,7 @@ enum PlaybackClient {
         client: NodeClient,
         to: Option<String>,
     },
-    Http(HttpClient),
+    Http(PeerClient),
 }
 
 impl PlaybackClient {
@@ -273,7 +274,7 @@ fn playback_client_for(
         || std::env::var_os("URA_TOKEN").is_some();
     if has_legacy_override {
         let config = Config::load_with_overrides(config_path, peer_url, token)?;
-        return Ok(PlaybackClient::Http(HttpClient::new(
+        return Ok(PlaybackClient::Http(PeerClient::new(
             config.receiver_url,
             config.token,
         )?));
@@ -287,9 +288,7 @@ fn playback_client_for(
     }
 
     match resolve_destination(config_path.as_deref(), to.as_deref())? {
-        Destination::Peer(peer) => Ok(PlaybackClient::Http(HttpClient::new(
-            peer.url, peer.token,
-        )?)),
+        Destination::Peer(peer) => Ok(PlaybackClient::Http(PeerClient::new(peer.url, peer.token)?)),
         Destination::SelfNode { name } => anyhow::bail!(
             "this device (`{name}`) is selected, but the local ura node is not running\n\nStart it with:\n  ura daemon"
         ),
@@ -395,8 +394,8 @@ fn pair_peer(
     select: bool,
     no_select: bool,
 ) -> Result<()> {
-    let normalized_address = normalize_receiver_address(address)?;
-    let pairing_client = PairingHttpClient::new(normalized_address.clone())?;
+    let normalized_address = normalize_peer_address(address)?;
+    let pairing_client = PeerPairingClient::new(normalized_address.clone())?;
     let info = pairing_client.info()?;
     let existing_config = DeviceConfig::load(config_path)?;
     let tty = io::stdin().is_terminal();

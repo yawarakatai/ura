@@ -67,9 +67,9 @@ instead of manually starting a second node process.
 
 Use two machines or isolated environments. Verify the routing invariant:
 
-1. Start `ura serve` on node A and node B.
+1. Start `ura daemon` on node A and node B.
 2. Expose node B's peer API explicitly when needed, for example
-   `ura serve --bind 0.0.0.0:8765`.
+   `ura daemon --bind 0.0.0.0:8765`.
 3. Pair A with B.
 4. On A, select `This device` and confirm playback is local to A.
 5. On A, select B and confirm the same `ura play` command plays on B.
@@ -154,12 +154,12 @@ show useful metadata and never print literal `null` for missing display values.
 
 ## Logging
 
-`ura serve` initializes tracing with `RUST_LOG` support and defaults to
+`ura daemon` initializes tracing with `RUST_LOG` support and defaults to
 `ura=info`.
 
 ```bash
 RUST_LOG=ura=debug cargo run -- serve
-RUST_LOG=ura=info ura serve
+RUST_LOG=ura=info ura daemon
 ```
 
 Logs must not print secrets. URL validation should log sanitized host/video-id

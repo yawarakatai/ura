@@ -2,7 +2,7 @@
 
 Status: Current `0.3.0` behavior.
 
-This document covers running `ura serve` as the long-lived local ura node.
+This document covers running `ura daemon` as the long-lived local ura node.
 Tailscale or another private overlay can be used for peer traffic, but is not a
 project requirement.
 
@@ -17,7 +17,7 @@ Playback commands do not daemonize ura implicitly. The long-running node owns:
 - pairing state and playback history
 
 For normal desktop use, run it as a systemd user service rather than starting
-`ura serve` manually for every playback command.
+`ura daemon` manually for every playback command.
 
 ## systemd User Service
 
@@ -52,7 +52,7 @@ journalctl --user -u ura.service -f
 The service runs:
 
 ```ini
-ExecStart=ura serve
+ExecStart=ura daemon
 ```
 
 The optional `~/.config/ura/ura.env` file is for process environment such as
@@ -66,7 +66,7 @@ The user service must be able to find:
 - `mpv`
 - `yt-dlp`
 
-`ura serve` validates its runtime dependencies at startup and mpv uses `yt-dlp`
+`ura daemon` validates its runtime dependencies at startup and mpv uses `yt-dlp`
 for supported media URLs.
 
 ## NixOS And Home Manager
@@ -84,7 +84,7 @@ The flake exports a Home Manager module:
 ```
 
 With the module enabled, the local ura node starts as a systemd user service, so
-normal commands such as `ura play` do not require manually running `ura serve`.
+normal commands such as `ura play` do not require manually running `ura daemon`.
 
 The module installs ura and adds mpv and yt-dlp to the service PATH.
 `services.ura.package`, `services.ura.bind`, and `services.ura.logLevel` can be
@@ -114,7 +114,7 @@ To let another ura node pair/control this machine, explicitly expose the peer
 API on an appropriate trusted interface:
 
 ```bash
-ura serve --bind 192.168.1.20:8765
+ura daemon --bind 192.168.1.20:8765
 ```
 
 or configure:

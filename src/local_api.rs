@@ -17,7 +17,7 @@ use tokio::{net::TcpListener, sync::oneshot};
 use tracing::{info, warn};
 
 use crate::{
-    client::PairingHttpClient,
+    client::PeerPairingClient,
     config::default_db_path,
     db::{Database, HistoryEntry},
     mpv::{LoopStatus, MpvStatus},
@@ -30,11 +30,11 @@ pub fn default_local_api_address() -> SocketAddr {
     SocketAddr::from((Ipv4Addr::LOCALHOST, DEFAULT_LOCAL_API_PORT))
 }
 
-pub async fn run_local_api(receiver_url: String, shutdown: oneshot::Receiver<()>) -> Result<()> {
+pub async fn run_local_api(peer_url: String, shutdown: oneshot::Receiver<()>) -> Result<()> {
     let bind = default_local_api_address();
     let state = LocalApiState {
         database: Arc::new(Database::open(default_db_path()?)?),
-        receiver_url: Arc::from(receiver_url),
+        peer_url: Arc::from(peer_url),
     };
     let app = app(state);
     let listener = TcpListener::bind(bind)
@@ -69,7 +69,7 @@ fn app(state: LocalApiState) -> Router {
 #[derive(Clone)]
 struct LocalApiState {
     database: Arc<Database>,
-    receiver_url: Arc<str>,
+    peer_url: Arc<str>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -112,14 +112,14 @@ struct SelectedResponse {
 #[derive(Debug, Serialize)]
 struct PairInfoResponse {
     pairing: bool,
-    receiver_name: String,
+    node_name: String,
     expires_in: u64,
 }
 
 #[derive(Debug, Serialize)]
 struct PairClaimResponse {
     protocol_version: u8,
-    receiver_name: String,
+    node_name: String,
     token: String,
 }
 
@@ -217,14 +217,14 @@ async fn select(
 async fn pair_info(
     State(state): State<LocalApiState>,
 ) -> std::result::Result<Json<PairInfoResponse>, LocalApiError> {
-    let receiver_url = state.receiver_url.to_string();
-    let info = tokio::task::spawn_blocking(move || PairingHttpClient::new(receiver_url)?.info())
+    let peer_url = state.peer_url.to_string();
+    let info = tokio::task::spawn_blocking(move || PeerPairingClient::new(peer_url)?.info())
         .await
         .map_err(LocalApiError::internal)?
         .map_err(|error| LocalApiError::new(StatusCode::BAD_GATEWAY, error.to_string()))?;
     Ok(Json(PairInfoResponse {
         pairing: true,
-        receiver_name: info.receiver_name,
+        node_name: info.node_name,
         expires_in: info.expires_in,
     }))
 }
@@ -253,11 +253,11 @@ async fn pair_claim(
         ));
     }
 
-    let receiver_url = state.receiver_url.to_string();
+    let peer_url = state.peer_url.to_string();
     let code = request.code;
     let device_name = request.device_name;
     let claim = tokio::task::spawn_blocking(move || {
-        PairingHttpClient::new(receiver_url)?.claim(&code, &device_name)
+        PeerPairingClient::new(peer_url)?.claim(&code, &device_name)
     })
     .await
     .map_err(LocalApiError::internal)?
@@ -265,7 +265,7 @@ async fn pair_claim(
 
     Ok(Json(PairClaimResponse {
         protocol_version: claim.protocol_version,
-        receiver_name: claim.receiver_name,
+        node_name: claim.node_name,
         token: claim.token,
     }))
 }

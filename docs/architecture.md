@@ -33,7 +33,7 @@ This prevents routing loops and accidental multi-hop playback.
 
 ## Runtime Components
 
-`ura serve` supervises three control surfaces around one local playback backend:
+`ura daemon` supervises three control surfaces around one local playback backend:
 
 ```text
 $XDG_RUNTIME_DIR/ura/node.sock
@@ -80,7 +80,7 @@ than being shown as a duplicate peer.
 The same binary provides node, playback, pairing, and device commands:
 
 ```bash
-ura serve
+ura daemon
 ura play "https://youtu.be/..."
 ura queue "https://youtu.be/..."
 ura pause
@@ -174,7 +174,7 @@ The Firefox manifest host permission is restricted to localhost.
 
 ## Peer HTTP API
 
-The peer API remains on the configured `ura serve` bind address. It is the
+The peer API remains on the configured `ura daemon` bind address. It is the
 network-facing playback API used by paired ura nodes.
 
 Authenticated routes are:

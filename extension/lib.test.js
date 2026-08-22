@@ -82,11 +82,11 @@ test("connecting Firefox pairs only with the local ura node", async () => {
   const fetchImpl = async (url, options) => {
     calls.push({ url, options });
     if (url.endsWith("/v1/pair/info")) {
-      return response(200, { pairing: true, receiver_name: "kamo", expires_in: 90 });
+      return response(200, { pairing: true, node_name: "kamo", expires_in: 90 });
     }
     return response(200, {
       protocol_version: 1,
-      receiver_name: "kamo",
+      node_name: "kamo",
       token: "returned-secret-token",
     });
   };
@@ -135,7 +135,7 @@ test("wrapped upstream pairing errors remain human readable", async () => {
         storage: storage(),
         fetchImpl: async (url) => {
           if (url.endsWith("/v1/pair/info")) {
-            return response(200, { pairing: true, receiver_name: "kamo", expires_in: 90 });
+            return response(200, { pairing: true, node_name: "kamo", expires_in: 90 });
           }
           return response(502, {
             error: 'HTTP 400 Bad Request: {"error":"invalid_pairing_code"}',
@@ -242,6 +242,6 @@ test("network failures tell the user to start the local node", async () => {
         },
         tabUrl: "https://youtu.be/example",
       }),
-    /Start `ura serve` or the ura user service/,
+    /Start `ura daemon` or the ura user service/,
   );
 });

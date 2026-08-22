@@ -259,13 +259,8 @@ mod tests {
     #[test]
     fn legacy_serve_and_receiver_url_aliases_still_parse() {
         Cli::try_parse_from(["ura", "serve"]).expect("legacy serve alias should parse");
-        Cli::try_parse_from([
-            "ura",
-            "--receiver-url",
-            "http://127.0.0.1:8765",
-            "status",
-        ])
-        .expect("legacy receiver-url alias should parse");
+        Cli::try_parse_from(["ura", "--receiver-url", "http://127.0.0.1:8765", "status"])
+            .expect("legacy receiver-url alias should parse");
     }
 
     #[test]

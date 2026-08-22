@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 
 use crate::error::UraError;
-use crate::receiver::validate_receiver_token;
+use crate::peer_api::validate_peer_token;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
@@ -20,7 +20,7 @@ pub struct Config {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RemoteDevice {
+pub struct Peer {
     pub name: String,
     pub url: String,
     pub token: String,
@@ -30,12 +30,12 @@ pub struct RemoteDevice {
 pub struct DeviceConfig {
     pub local_name: Option<String>,
     pub selected_device: Option<String>,
-    pub devices: Vec<RemoteDevice>,
-    pub legacy_device: Option<RemoteDevice>,
+    pub devices: Vec<Peer>,
+    pub legacy_device: Option<Peer>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReceiverConfig {
+pub struct NodeConfig {
     pub bind: SocketAddr,
     pub token: Option<String>,
 }
@@ -139,7 +139,7 @@ impl DeviceConfig {
                 if device.token.trim().is_empty() {
                     anyhow::bail!("device `{}` token must not be empty", device.name);
                 }
-                Ok(RemoteDevice {
+                Ok(Peer {
                     name: device.name,
                     url: device.url,
                     token: device.token,
@@ -157,7 +157,7 @@ impl DeviceConfig {
             validate_device_name(name)?;
         }
         let legacy_device = match (file_config.receiver_url, file_config.token) {
-            (Some(url), Some(token)) if devices.is_empty() => Some(RemoteDevice {
+            (Some(url), Some(token)) if devices.is_empty() => Some(Peer {
                 name: "legacy".to_string(),
                 url,
                 token,
@@ -177,7 +177,7 @@ impl DeviceConfig {
         Self::from_file_config(file_config)
     }
 
-    pub fn resolve(&self, to: Option<&str>) -> Result<RemoteDevice> {
+    pub fn resolve(&self, to: Option<&str>) -> Result<Peer> {
         if let Some(name) = to {
             return self
                 .devices
@@ -221,9 +221,9 @@ impl DeviceConfig {
         if config.devices.iter().any(|device| device.name == name) {
             anyhow::bail!("device `{name}` already exists");
         }
-        config.devices.push(RemoteDevice {
+        config.devices.push(Peer {
             name: name.to_string(),
-            url: normalize_receiver_address(address)?,
+            url: normalize_peer_address(address)?,
             token: token.to_string(),
         });
         write_device_config(&path, &config)
@@ -252,9 +252,9 @@ impl DeviceConfig {
             anyhow::bail!("device `{receiver_alias}` already exists");
         }
         config.local_name = Some(local_name.to_string());
-        config.devices.push(RemoteDevice {
+        config.devices.push(Peer {
             name: receiver_alias.to_string(),
-            url: normalize_receiver_address(address)?,
+            url: normalize_peer_address(address)?,
             token: token.to_string(),
         });
         if select {
@@ -288,7 +288,7 @@ impl DeviceConfig {
     }
 }
 
-impl ReceiverConfig {
+impl NodeConfig {
     pub fn load_with_overrides(
         config_path: Option<PathBuf>,
         bind: Option<SocketAddr>,
@@ -339,7 +339,7 @@ fn init_config_at_path(path: &Path, init: ConfigInit) -> Result<PathBuf> {
         Some(token) => token,
         None => generate_token()?,
     };
-    validate_receiver_token(&token)?;
+    validate_peer_token(&token)?;
 
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
@@ -371,7 +371,7 @@ fn init_config_at_path(path: &Path, init: ConfigInit) -> Result<PathBuf> {
     Ok(path.to_path_buf())
 }
 
-pub fn normalize_receiver_address(address: &str) -> Result<String> {
+pub fn normalize_peer_address(address: &str) -> Result<String> {
     let address = address.trim();
     if address.is_empty() || address.chars().any(char::is_whitespace) {
         anyhow::bail!("receiver address must not be empty or contain whitespace");
@@ -523,7 +523,7 @@ fn write_device_config(path: &Path, config: &DeviceConfig) -> Result<()> {
     Ok(())
 }
 
-fn validate_unique_device_names(devices: &[RemoteDevice]) -> Result<()> {
+fn validate_unique_device_names(devices: &[Peer]) -> Result<()> {
     let mut names = std::collections::HashSet::new();
     for device in devices {
         if !names.insert(device.name.as_str()) {
@@ -575,7 +575,9 @@ pub fn default_bind() -> SocketAddr {
 }
 
 fn env_receiver_url() -> Option<String> {
-    env::var("URA_RECEIVER_URL").ok()
+    env::var("URA_PEER_URL")
+        .ok()
+        .or_else(|| env::var("URA_RECEIVER_URL").ok())
 }
 
 fn env_token() -> Option<String> {
@@ -760,7 +762,7 @@ token = "secret"
 
     #[test]
     fn receiver_reads_token_and_bind_from_config_file() {
-        let config = ReceiverConfig::from_sources(
+        let config = NodeConfig::from_sources(
             Some(FileConfig {
                 receiver_url: None,
                 token: Some("0123456789abcdef0123456789abcdef".to_string()),
@@ -782,7 +784,7 @@ token = "secret"
 
     #[test]
     fn receiver_defaults_bind_when_config_omits_it() {
-        let config = ReceiverConfig::from_sources(
+        let config = NodeConfig::from_sources(
             Some(FileConfig {
                 receiver_url: None,
                 token: Some("0123456789abcdef0123456789abcdef".to_string()),
@@ -800,7 +802,7 @@ token = "secret"
 
     #[test]
     fn receiver_can_omit_legacy_token() {
-        let config = ReceiverConfig::from_sources(
+        let config = NodeConfig::from_sources(
             Some(FileConfig {
                 receiver_url: None,
                 token: None,
@@ -818,7 +820,7 @@ token = "secret"
 
     #[test]
     fn env_overrides_receiver_config_file() {
-        let config = ReceiverConfig::from_sources(
+        let config = NodeConfig::from_sources(
             Some(FileConfig {
                 receiver_url: None,
                 token: Some("config-token".to_string()),
@@ -837,7 +839,7 @@ token = "secret"
 
     #[test]
     fn cli_overrides_env_and_receiver_config_file() {
-        let config = ReceiverConfig::from_sources(
+        let config = NodeConfig::from_sources(
             Some(FileConfig {
                 receiver_url: None,
                 token: Some("config-token".to_string()),
@@ -902,7 +904,7 @@ token = "secret"
             load_config_from_path_with_overrides(&created, None, None).expect("load new config");
         assert_eq!(config.receiver_url, "http://127.0.0.1:8765");
         assert!(config.token.len() >= 32);
-        crate::receiver::validate_receiver_token(&config.token).expect("generated token is valid");
+        crate::peer_api::validate_peer_token(&config.token).expect("generated token is valid");
         assert!(
             fs::read_to_string(&created)
                 .expect("read new config")
@@ -917,7 +919,7 @@ token = "secret"
         let token = generate_token().expect("generate token");
 
         assert!(token.len() >= 32);
-        crate::receiver::validate_receiver_token(&token).expect("generated token is valid");
+        crate::peer_api::validate_peer_token(&token).expect("generated token is valid");
     }
 
     #[test]
@@ -992,23 +994,23 @@ token = "0123456789abcdef0123456789abcdef"
     #[test]
     fn normalizes_receiver_addresses() {
         assert_eq!(
-            normalize_receiver_address("192.168.1.23").expect("normalize"),
+            normalize_peer_address("192.168.1.23").expect("normalize"),
             "http://192.168.1.23:8765"
         );
         assert_eq!(
-            normalize_receiver_address("http://192.168.1.23").expect("normalize"),
+            normalize_peer_address("http://192.168.1.23").expect("normalize"),
             "http://192.168.1.23:8765"
         );
         assert_eq!(
-            normalize_receiver_address("kamo:9999").expect("normalize"),
+            normalize_peer_address("kamo:9999").expect("normalize"),
             "http://kamo:9999"
         );
         assert_eq!(
-            normalize_receiver_address("kamo.local").expect("normalize"),
+            normalize_peer_address("kamo.local").expect("normalize"),
             "http://kamo.local:8765"
         );
         assert_eq!(
-            normalize_receiver_address("http://kamo/").expect("normalize"),
+            normalize_peer_address("http://kamo/").expect("normalize"),
             "http://kamo:8765"
         );
     }
@@ -1022,7 +1024,7 @@ token = "0123456789abcdef0123456789abcdef"
             "http://kamo#fragment",
             "http://user@kamo",
         ] {
-            normalize_receiver_address(address).expect_err("address should fail");
+            normalize_peer_address(address).expect_err("address should fail");
         }
     }
 
@@ -1088,7 +1090,7 @@ token = "dane-token"
         let config = DeviceConfig {
             local_name: None,
             selected_device: None,
-            devices: vec![RemoteDevice {
+            devices: vec![Peer {
                 name: "kamo".to_string(),
                 url: "http://kamo:8765".to_string(),
                 token: "token".to_string(),
