@@ -17,6 +17,6 @@ jobs:
         with:
           components: rustfmt
       - name: Run tests
-        run: cargo test --locked
+        run: cargo test
       - name: Check formatting
         run: cargo fmt --check
