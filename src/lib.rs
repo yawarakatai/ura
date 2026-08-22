@@ -4,5 +4,7 @@ pub mod config;
 pub mod db;
 pub mod error;
 pub mod mpv;
+pub mod node;
 pub mod pairing;
 pub mod receiver;
+pub mod selector;
