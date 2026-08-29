@@ -1,13 +1,13 @@
 {
   "manifest_version": 2,
   "name": "ura",
-  "version": "0.2.0",
-  "description": "Send the current tab URL to an ura receiver.",
+  "version": "0.3.0",
+  "description": "Send the current tab URL through your local ura node.",
   "permissions": [
     "activeTab",
     "storage",
     "notifications",
-    "http://*/*"
+    "http://127.0.0.1/*"
   ],
   "browser_action": {
     "default_title": "Send to ura"

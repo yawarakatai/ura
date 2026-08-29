@@ -11,19 +11,19 @@ use crate::{
     mpv::{LoopStatus, MpvStatus},
 };
 
-pub struct HttpClient {
-    base: ReceiverBase,
+pub struct PeerClient {
+    base: PeerBase,
     token: String,
 }
 
-pub struct PairingHttpClient {
-    base: ReceiverBase,
+pub struct PeerPairingClient {
+    base: PeerBase,
 }
 
-impl PairingHttpClient {
-    pub fn new(receiver_url: String) -> Result<Self> {
+impl PeerPairingClient {
+    pub fn new(peer_url: String) -> Result<Self> {
         Ok(Self {
-            base: ReceiverBase::parse(&receiver_url)?,
+            base: PeerBase::parse(&peer_url)?,
         })
     }
 
@@ -38,7 +38,7 @@ impl PairingHttpClient {
 
     fn send(&self, method: &str, path: &str, body: Option<&str>) -> Result<HttpResponse> {
         let mut stream = TcpStream::connect(&self.base.address)
-            .with_context(|| format!("failed to connect to receiver at {}", self.base.address))?;
+            .with_context(|| format!("failed to connect to peer at {}", self.base.address))?;
         let body = body.unwrap_or("");
         let request = format!(
             "{method} {}{path} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -50,33 +50,35 @@ impl PairingHttpClient {
 
         stream
             .write_all(request.as_bytes())
-            .with_context(|| "failed to send HTTP request to receiver")?;
+            .with_context(|| "failed to send HTTP request to peer")?;
 
         let mut response = String::new();
         stream
             .read_to_string(&mut response)
-            .with_context(|| "failed to read HTTP response from receiver")?;
+            .with_context(|| "failed to read HTTP response from peer")?;
         HttpResponse::parse(&response)
     }
 }
 
 #[derive(Debug, serde::Deserialize)]
 pub struct PairInfo {
-    pub receiver_name: String,
+    #[serde(rename = "receiver_name")]
+    pub node_name: String,
     pub expires_in: u64,
 }
 
 #[derive(Debug, serde::Deserialize)]
 pub struct PairClaim {
     pub protocol_version: u8,
-    pub receiver_name: String,
+    #[serde(rename = "receiver_name")]
+    pub node_name: String,
     pub token: String,
 }
 
-impl HttpClient {
-    pub fn new(receiver_url: String, token: String) -> Result<Self> {
+impl PeerClient {
+    pub fn new(peer_url: String, token: String) -> Result<Self> {
         Ok(Self {
-            base: ReceiverBase::parse(&receiver_url)?,
+            base: PeerBase::parse(&peer_url)?,
             token,
         })
     }
@@ -104,7 +106,7 @@ impl HttpClient {
         )?;
         response
             .loop_status
-            .ok_or_else(|| anyhow::anyhow!("receiver did not return loop status"))
+            .ok_or_else(|| anyhow::anyhow!("peer did not return loop status"))
     }
 
     pub fn status(&self) -> Result<MpvStatus> {
@@ -143,7 +145,7 @@ impl HttpClient {
 
     fn send(&self, method: &str, path: &str, body: Option<&str>) -> Result<HttpResponse> {
         let mut stream = TcpStream::connect(&self.base.address)
-            .with_context(|| format!("failed to connect to receiver at {}", self.base.address))?;
+            .with_context(|| format!("failed to connect to peer at {}", self.base.address))?;
         let body = body.unwrap_or("");
         let request = format!(
             "{method} {}{path} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -156,12 +158,12 @@ impl HttpClient {
 
         stream
             .write_all(request.as_bytes())
-            .with_context(|| "failed to send HTTP request to receiver")?;
+            .with_context(|| "failed to send HTTP request to peer")?;
 
         let mut response = String::new();
         stream
             .read_to_string(&mut response)
-            .with_context(|| "failed to read HTTP response from receiver")?;
+            .with_context(|| "failed to read HTTP response from peer")?;
         HttpResponse::parse(&response)
     }
 }
@@ -189,17 +191,17 @@ struct ControlResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ReceiverBase {
+struct PeerBase {
     address: String,
     host_header: String,
     path_prefix: String,
 }
 
-impl ReceiverBase {
-    fn parse(receiver_url: &str) -> Result<Self> {
-        let rest = receiver_url
+impl PeerBase {
+    fn parse(peer_url: &str) -> Result<Self> {
+        let rest = peer_url
             .strip_prefix("http://")
-            .ok_or_else(|| anyhow::anyhow!("receiver_url must start with http://"))?;
+            .ok_or_else(|| anyhow::anyhow!("peer URL must start with http://"))?;
         let (authority, path_prefix) = match rest.split_once('/') {
             Some((authority, path)) => (
                 authority,
@@ -208,7 +210,7 @@ impl ReceiverBase {
             None => (rest, String::new()),
         };
         if authority.is_empty() {
-            bail!("receiver_url is missing host");
+            bail!("peer URL is missing host");
         }
 
         Ok(Self {
@@ -229,14 +231,14 @@ impl HttpResponse {
     fn parse(response: &str) -> Result<Self> {
         let (head, body) = response
             .split_once("\r\n\r\n")
-            .ok_or_else(|| anyhow::anyhow!("invalid HTTP response from receiver"))?;
+            .ok_or_else(|| anyhow::anyhow!("invalid HTTP response from peer"))?;
         let status = head
             .lines()
             .next()
             .and_then(|line| line.split_whitespace().nth(1))
-            .ok_or_else(|| anyhow::anyhow!("invalid HTTP status from receiver"))?
+            .ok_or_else(|| anyhow::anyhow!("invalid HTTP status from peer"))?
             .parse()
-            .with_context(|| "invalid HTTP status from receiver")?;
+            .with_context(|| "invalid HTTP status from peer")?;
 
         Ok(Self {
             status,
@@ -248,7 +250,7 @@ impl HttpResponse {
         if (200..300).contains(&self.status) {
             Ok(())
         } else {
-            bail!("receiver returned HTTP {}: {}", self.status, self.body)
+            bail!("peer returned HTTP {}: {}", self.status, self.body)
         }
     }
 
@@ -257,7 +259,7 @@ impl HttpResponse {
         T: DeserializeOwned,
     {
         self.ensure_success()?;
-        serde_json::from_str(&self.body).with_context(|| "failed to parse receiver JSON response")
+        serde_json::from_str(&self.body).with_context(|| "failed to parse peer JSON response")
     }
 }
 
@@ -271,10 +273,10 @@ mod tests {
     };
 
     #[test]
-    fn parses_receiver_base_url() {
+    fn parses_peer_base_url() {
         assert_eq!(
-            ReceiverBase::parse("http://127.0.0.1:8765").expect("parse receiver URL"),
-            ReceiverBase {
+            PeerBase::parse("http://127.0.0.1:8765").expect("parse peer URL"),
+            PeerBase {
                 address: "127.0.0.1:8765".to_string(),
                 host_header: "127.0.0.1:8765".to_string(),
                 path_prefix: String::new(),
@@ -283,9 +285,9 @@ mod tests {
     }
 
     #[test]
-    fn rejects_non_http_receiver_url() {
-        let error = ReceiverBase::parse("https://127.0.0.1:8765")
-            .expect_err("https receiver URL should fail");
+    fn rejects_non_http_peer_url() {
+        let error =
+            PeerBase::parse("https://127.0.0.1:8765").expect_err("https peer URL should fail");
 
         assert!(error.to_string().contains("http://"));
     }
@@ -374,10 +376,10 @@ mod tests {
 
     fn capture_request<T, F>(response_body: &str, send: F) -> String
     where
-        F: FnOnce(&HttpClient) -> Result<T>,
+        F: FnOnce(&PeerClient) -> Result<T>,
     {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test receiver");
-        let address = listener.local_addr().expect("read test receiver address");
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test peer");
+        let address = listener.local_addr().expect("read test peer address");
         let response_body = response_body.to_string();
         let handle = thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept client request");
@@ -393,13 +395,13 @@ mod tests {
             request
         });
 
-        let client = HttpClient::new(
+        let client = PeerClient::new(
             format!("http://{address}"),
             "0123456789abcdef0123456789abcdef".to_string(),
         )
         .expect("create client");
         send(&client).expect("send client request");
-        handle.join().expect("join test receiver")
+        handle.join().expect("join test peer")
     }
 
     fn read_http_request(stream: &mut std::net::TcpStream) -> String {

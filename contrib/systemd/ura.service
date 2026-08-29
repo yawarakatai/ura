@@ -1,11 +1,11 @@
 [Unit]
-Description=ura audio receiver
+Description=ura audio node
 After=default.target
 
 [Service]
 Type=simple
 EnvironmentFile=-%h/.config/ura/ura.env
-ExecStart=ura serve
+ExecStart=ura daemon
 Restart=on-failure
 RestartSec=2
 

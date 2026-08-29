@@ -31,17 +31,17 @@ use crate::config::{
     default_control_socket_path, default_db_path, default_device_name, default_mpv_socket_path,
     default_port,
 };
-use crate::db::{Database, HistoryEntry, authorize_device};
+use crate::db::{Database, HistoryEntry, authorize_client};
 use crate::mpv::{
     LoopMode, LoopStatus, MpvClient, MpvEventObserver, QueueMode, SharedPlaybackState,
     observed_status, register_playback_request, rollback_playback_request, shared_playback_state,
 };
 use crate::pairing::{ClaimDecision, PairingCompletion, PairingManager, PairingStatus};
 
-pub async fn run_serve(bind: SocketAddr, token: Option<String>) -> AnyhowResult<()> {
-    info!("receiver startup");
+pub async fn run_peer_api(bind: SocketAddr, token: Option<String>) -> AnyhowResult<()> {
+    info!("peer API startup");
     if let Some(token) = &token {
-        validate_receiver_token(token)?;
+        validate_peer_token(token)?;
     }
     ensure_program_in_path("mpv")?;
     ensure_program_in_path("yt-dlp")?;
@@ -54,14 +54,14 @@ pub async fn run_serve(bind: SocketAddr, token: Option<String>) -> AnyhowResult<
     let playback_state = shared_playback_state();
     let pairing = Arc::new(PairingManager::new(default_device_name()));
 
-    let receiver = Receiver::start(socket_path)?;
-    let (socket_path, mut mpv_shutdown, mut mpv_task) = receiver.into_parts();
+    let playback = PlaybackRuntime::start(socket_path)?;
+    let (socket_path, mut mpv_shutdown, mut mpv_task) = playback.into_parts();
     let _mpv_observer = MpvEventObserver::start(
         socket_path.clone(),
         Arc::clone(&database),
         Arc::clone(&playback_state),
     );
-    info!(bind = %bind, "HTTP receiver bind address");
+    info!(bind = %bind, "peer API bind address");
 
     let (control_shutdown, control_shutdown_rx) = oneshot::channel();
     let mut control_shutdown = Some(control_shutdown);
@@ -90,13 +90,13 @@ pub async fn run_serve(bind: SocketAddr, token: Option<String>) -> AnyhowResult<
             info!(status = %status, "mpv child termination");
             signal_shutdown(&mut api_shutdown);
             signal_shutdown(&mut control_shutdown);
-            await_task(api_task, "HTTP receiver").await?;
+            await_task(api_task, "peer API").await?;
             await_task(control_task, "control socket").await?;
-            info!("receiver shutdown");
+            info!("peer API shutdown");
             exit_status_result(status)
         }
         result = &mut api_task => {
-            let api_result = task_result(result, "HTTP receiver");
+            let api_result = task_result(result, "peer API");
             signal_shutdown(&mut control_shutdown);
             signal_shutdown(&mut mpv_shutdown);
             let control_result = await_task(control_task, "control socket").await;
@@ -105,20 +105,20 @@ pub async fn run_serve(bind: SocketAddr, token: Option<String>) -> AnyhowResult<
             control_result?;
             let status = mpv_result?;
             info!(status = %status, "mpv child termination");
-            info!("receiver shutdown");
+            info!("peer API shutdown");
             Ok(())
         }
         result = &mut control_task => {
             let control_result = task_result(result, "control socket");
             signal_shutdown(&mut api_shutdown);
             signal_shutdown(&mut mpv_shutdown);
-            let api_result = await_task(api_task, "HTTP receiver").await;
+            let api_result = await_task(api_task, "peer API").await;
             let mpv_result = await_task(mpv_task, "mpv supervision").await;
             control_result?;
             api_result?;
             let status = mpv_result?;
             info!(status = %status, "mpv child termination");
-            info!("receiver shutdown");
+            info!("peer API shutdown");
             Ok(())
         }
         result = tokio::signal::ctrl_c() => {
@@ -128,14 +128,14 @@ pub async fn run_serve(bind: SocketAddr, token: Option<String>) -> AnyhowResult<
             signal_shutdown(&mut control_shutdown);
             signal_shutdown(&mut mpv_shutdown);
             let mpv_result = await_task(mpv_task, "mpv supervision").await;
-            let api_result = await_task(api_task, "HTTP receiver").await;
+            let api_result = await_task(api_task, "peer API").await;
             let control_result = await_task(control_task, "control socket").await;
             ctrl_c_result?;
             let status = mpv_result?;
             api_result?;
             control_result?;
             info!(status = %status, "mpv child termination");
-            info!("receiver shutdown");
+            info!("peer API shutdown");
             Ok(())
         }
     }
@@ -160,15 +160,15 @@ async fn run_api(
     let app = app(state);
     let listener = TcpListener::bind(bind)
         .await
-        .with_context(|| format!("failed to bind HTTP receiver to {bind}"))?;
-    info!(bind = %bind, "HTTP receiver listening");
+        .with_context(|| format!("failed to bind peer API to {bind}"))?;
+    info!(bind = %bind, "peer API listening");
 
     axum::serve(listener, app)
         .with_graceful_shutdown(async {
             let _ = shutdown.await;
         })
         .await
-        .with_context(|| "HTTP receiver failed")
+        .with_context(|| "peer API failed")
 }
 
 async fn run_control_socket(
@@ -364,7 +364,8 @@ struct ErrorResponse {
 #[derive(Debug, Serialize)]
 struct PairInfoResponse {
     pairing: bool,
-    receiver_name: String,
+    #[serde(rename = "receiver_name")]
+    node_name: String,
     expires_in: u64,
 }
 
@@ -377,7 +378,8 @@ struct PairClaimRequest {
 #[derive(Debug, Serialize)]
 struct PairClaimResponse {
     protocol_version: u8,
-    receiver_name: String,
+    #[serde(rename = "receiver_name")]
+    node_name: String,
     token: String,
 }
 
@@ -527,12 +529,12 @@ async fn pair_info(
 ) -> std::result::Result<Json<PairInfoResponse>, AppError> {
     match state.pairing.status().await {
         PairingStatus::Active {
-            receiver_name,
+            node_name,
             expires_in,
             ..
         } => Ok(Json(PairInfoResponse {
             pairing: true,
-            receiver_name,
+            node_name,
             expires_in,
         })),
         PairingStatus::Inactive => Err(AppError::new(StatusCode::FORBIDDEN, "pairing_not_active")),
@@ -579,8 +581,8 @@ async fn pair_claim(
         }
     }
 
-    let receiver_name = match state.pairing.status().await {
-        PairingStatus::Active { receiver_name, .. } => receiver_name,
+    let node_name = match state.pairing.status().await {
+        PairingStatus::Active { node_name, .. } => node_name,
         PairingStatus::Inactive => {
             state.pairing.fail_claim().await;
             return Err(AppError::new(StatusCode::FORBIDDEN, "pairing_not_active"));
@@ -591,18 +593,18 @@ async fn pair_claim(
     let device_name_for_db = device_name.clone();
     let token = tokio::task::spawn_blocking(move || {
         if database
-            .authorized_devices()?
+            .authorized_clients()?
             .iter()
             .any(|device| device.name == device_name_for_db)
         {
-            anyhow::bail!("duplicate authorized device");
+            anyhow::bail!("duplicate authorized client");
         }
-        authorize_device(&database, &device_name_for_db)
+        authorize_client(&database, &device_name_for_db)
     })
     .await
     .map_err(|error| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
     .map_err(|error| {
-        if error.to_string().contains("duplicate authorized device")
+        if error.to_string().contains("duplicate authorized client")
             || error.to_string().contains("UNIQUE constraint")
         {
             AppError::new(StatusCode::CONFLICT, "device_name_exists")
@@ -623,7 +625,7 @@ async fn pair_claim(
     state.pairing.complete_claim(device_name).await;
     Ok(Json(PairClaimResponse {
         protocol_version: 1,
-        receiver_name,
+        node_name,
         token,
     }))
 }
@@ -725,19 +727,19 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
         == 0
 }
 
-pub fn validate_receiver_token(token: &str) -> AnyhowResult<()> {
+pub fn validate_peer_token(token: &str) -> AnyhowResult<()> {
     let token = token.trim();
     if token.is_empty() {
-        return Err(anyhow::anyhow!("receiver token must not be empty"));
+        return Err(anyhow::anyhow!("peer API token must not be empty"));
     }
     if token == "change-me" {
         return Err(anyhow::anyhow!(
-            "receiver token must be changed before starting the receiver"
+            "peer API token must be changed before starting the node"
         ));
     }
     if token.len() < 32 {
         return Err(anyhow::anyhow!(
-            "receiver token must be at least 32 characters"
+            "peer API token must be at least 32 characters"
         ));
     }
 
@@ -1050,13 +1052,13 @@ fn exit_status_result(status: ExitStatus) -> AnyhowResult<()> {
     }
 }
 
-struct Receiver {
+struct PlaybackRuntime {
     socket_path: PathBuf,
     shutdown: Option<oneshot::Sender<()>>,
     task: Option<JoinHandle<AnyhowResult<ExitStatus>>>,
 }
 
-impl Receiver {
+impl PlaybackRuntime {
     fn start(socket_path: PathBuf) -> AnyhowResult<Self> {
         prepare_mpv_socket_path(&socket_path)?;
         let mpv = TokioCommand::new("mpv")
@@ -1090,12 +1092,12 @@ impl Receiver {
         let task = self
             .task
             .take()
-            .expect("receiver process task should exist");
+            .expect("playback process task should exist");
         (socket_path, shutdown, task)
     }
 }
 
-impl Drop for Receiver {
+impl Drop for PlaybackRuntime {
     fn drop(&mut self) {
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.send(());
@@ -1144,7 +1146,7 @@ fn prepare_mpv_socket_path(socket_path: &Path) -> AnyhowResult<()> {
 
     match UnixStream::connect(socket_path) {
         Ok(_) => Err(anyhow::anyhow!(
-            "mpv IPC socket {} is already in use; stop the existing receiver before starting a new one",
+            "mpv IPC socket {} is already in use; stop the existing node before starting a new one",
             socket_path.display()
         )),
         Err(error) if error.kind() == ErrorKind::ConnectionRefused => {
@@ -1190,7 +1192,7 @@ fn prepare_control_socket_path(socket_path: &Path) -> AnyhowResult<()> {
 
     match UnixStream::connect(socket_path) {
         Ok(_) => Err(anyhow::anyhow!(
-            "control socket {} is already in use; stop the existing receiver before starting a new one",
+            "control socket {} is already in use; stop the existing node before starting a new one",
             socket_path.display()
         )),
         Err(error) if error.kind() == ErrorKind::ConnectionRefused => {
@@ -1342,7 +1344,7 @@ mod tests {
         let (state, db_path) = test_state();
         state
             .database
-            .authorize_device("desuwa", "abcdef0123456789abcdef0123456789")
+            .authorize_client("desuwa", "abcdef0123456789abcdef0123456789")
             .expect("authorize device");
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -1360,11 +1362,11 @@ mod tests {
         let (state, db_path) = test_state();
         state
             .database
-            .authorize_device("desuwa", "abcdef0123456789abcdef0123456789")
+            .authorize_client("desuwa", "abcdef0123456789abcdef0123456789")
             .expect("authorize device");
         state
             .database
-            .revoke_authorized_device("desuwa")
+            .revoke_authorized_client("desuwa")
             .expect("revoke device");
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -1383,15 +1385,15 @@ mod tests {
         let (state, db_path) = test_state();
         state
             .database
-            .authorize_device("desuwa", "abcdef0123456789abcdef0123456789")
+            .authorize_client("desuwa", "abcdef0123456789abcdef0123456789")
             .expect("authorize first");
         state
             .database
-            .authorize_device("firefox", "fedcba9876543210fedcba9876543210")
+            .authorize_client("firefox", "fedcba9876543210fedcba9876543210")
             .expect("authorize second");
         state
             .database
-            .revoke_authorized_device("desuwa")
+            .revoke_authorized_client("desuwa")
             .expect("revoke first");
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -1694,14 +1696,14 @@ mod tests {
 
     #[test]
     fn rejects_unsafe_receiver_tokens() {
-        assert!(validate_receiver_token("").is_err());
-        assert!(validate_receiver_token("change-me").is_err());
-        assert!(validate_receiver_token("short-token").is_err());
+        assert!(validate_peer_token("").is_err());
+        assert!(validate_peer_token("change-me").is_err());
+        assert!(validate_peer_token("short-token").is_err());
     }
 
     #[test]
     fn accepts_receiver_tokens_with_at_least_32_characters() {
-        validate_receiver_token("0123456789abcdef0123456789abcdef")
+        validate_peer_token("0123456789abcdef0123456789abcdef")
             .expect("32 character token should pass");
     }
 

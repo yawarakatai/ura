@@ -1,9 +1,7 @@
 const api = typeof browser !== "undefined" ? browser : chrome;
 
 const form = document.querySelector("#pairing-form");
-const receiverAddress = document.querySelector("#receiver-address");
 const pairingCode = document.querySelector("#pairing-code");
-const receiverName = document.querySelector("#receiver-name");
 const localDeviceName = document.querySelector("#local-device-name");
 const defaultAction = document.querySelector("#default-action");
 const status = document.querySelector("#status");
@@ -16,17 +14,15 @@ form.addEventListener("submit", async (event) => {
   event.preventDefault();
   status.textContent = "";
   try {
-    const paired = await UraExtension.pairDevice({
+    const connected = await UraExtension.connectLocalNode({
       storage: api.storage,
       fetchImpl: fetch,
-      address: receiverAddress.value,
       code: pairingCode.value,
-      receiverName: receiverName.value,
       localDeviceName: localDeviceName.value,
       defaultAction: defaultAction.value,
     });
     pairingCode.value = "";
-    status.textContent = `Paired and selected ${paired.name}.`;
+    status.textContent = `Connected to ${connected.nodeName}.`;
     await restoreOptions();
   } catch (error) {
     status.textContent = error.message || String(error);
@@ -42,62 +38,66 @@ async function restoreOptions() {
   const settings = await UraExtension.loadSettings(api.storage);
   defaultAction.value = settings.defaultAction;
   localDeviceName.value = settings.localDeviceName;
-  renderDevices(settings);
-}
 
-function renderDevices(settings) {
-  selectedDevice.textContent = settings.selectedDevice
-    ? `Selected receiver: ${settings.selectedDevice}`
-    : "Selected receiver: none";
-  devices.replaceChildren();
-
-  if (settings.devices.length === 0) {
-    const empty = document.createElement("p");
-    empty.textContent = "No receivers paired.";
-    devices.append(empty);
+  if (!settings.nodeToken) {
+    renderDisconnected();
     return;
   }
 
-  for (const device of settings.devices) {
+  try {
+    const deviceSet = await UraExtension.loadDevices({
+      storage: api.storage,
+      fetchImpl: fetch,
+    });
+    renderDevices(deviceSet);
+  } catch (error) {
+    renderDisconnected();
+    status.textContent = error.message || String(error);
+  }
+}
+
+function renderDisconnected() {
+  selectedDevice.textContent = "Local ura node: not connected";
+  devices.replaceChildren();
+}
+
+function renderDevices(deviceSet) {
+  selectedDevice.textContent = `Selected device: ${deviceSet.selected}`;
+  devices.replaceChildren();
+
+  for (const device of deviceSet.devices || []) {
     const row = document.createElement("div");
     row.className = "device-row";
 
     const name = document.createElement("span");
     name.textContent = device.name;
-    const host = document.createElement("span");
-    host.textContent = UraExtension.displayHost(device.url);
+
+    const detail = document.createElement("span");
+    detail.textContent = device.kind === "this_device" ? "This device" : device.address || "Peer";
+
     const actions = document.createElement("span");
     actions.className = "device-actions";
 
     const select = document.createElement("button");
     select.type = "button";
     select.textContent = "Select";
-    select.disabled = settings.selectedDevice === device.name;
+    select.disabled = deviceSet.selected === device.name;
     select.addEventListener("click", async () => {
       try {
-        await UraExtension.selectDevice(api.storage, device.name);
-        status.textContent = `Selected ${device.name}.`;
+        const selected = await UraExtension.selectDevice({
+          storage: api.storage,
+          fetchImpl: fetch,
+          name: device.name,
+        });
+        status.textContent = `Selected ${selected}.`;
         await restoreOptions();
       } catch (error) {
         status.textContent = error.message || String(error);
       }
     });
 
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.textContent = "Remove";
-    remove.addEventListener("click", async () => {
-      try {
-        await UraExtension.removeDevice(api.storage, device.name);
-        status.textContent = `Removed ${device.name}.`;
-        await restoreOptions();
-      } catch (error) {
-        status.textContent = error.message || String(error);
-      }
-    });
-
-    actions.append(select, remove);
-    row.append(name, host, actions);
+    actions.append(select);
+    row.append(name, detail, actions);
     devices.append(row);
   }
 }

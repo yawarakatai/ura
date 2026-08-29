@@ -3,13 +3,17 @@ use std::{net::SocketAddr, path::PathBuf};
 use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
-#[command(name = "ura", version, about = "A tiny remote audio receiver for Linux.")]
+#[command(
+    name = "ura",
+    version,
+    about = "Play audio on this or another paired Linux device."
+)]
 pub struct Cli {
     #[arg(long, global = true)]
     pub config: Option<PathBuf>,
 
-    #[arg(long, global = true)]
-    pub receiver_url: Option<String>,
+    #[arg(long = "peer-url", alias = "receiver-url", global = true)]
+    pub peer_url: Option<String>,
 
     #[arg(long, global = true)]
     pub token: Option<String>,
@@ -20,40 +24,43 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Start the long-running local audio receiver.
-    Serve {
-        /// Address for the HTTP receiver API to bind.
+    /// Run the long-running local ura node.
+    #[command(alias = "serve")]
+    Daemon {
+        /// Address for the peer HTTP API to bind.
         #[arg(long)]
         bind: Option<SocketAddr>,
     },
-    /// Play a URL immediately.
+    /// Play a URL immediately on the selected device.
     Play {
+        /// Override the selected device for this command only.
         #[arg(long)]
         to: Option<String>,
         url: String,
     },
-    /// Add a media URL to the end of the selected device's playback queue.
+    /// Add a media URL to the selected device's playback queue.
     Queue {
+        /// Override the selected device for this command only.
         #[arg(long)]
         to: Option<String>,
         url: String,
     },
-    /// Pause playback on the receiver.
+    /// Pause playback on the selected device.
     Pause {
         #[arg(long)]
         to: Option<String>,
     },
-    /// Resume playback on the receiver.
+    /// Resume playback on the selected device.
     Resume {
         #[arg(long)]
         to: Option<String>,
     },
-    /// Toggle pause/resume on the receiver.
+    /// Toggle pause/resume on the selected device.
     Toggle {
         #[arg(long)]
         to: Option<String>,
     },
-    /// Stop playback on the receiver.
+    /// Stop playback on the selected device.
     Stop {
         #[arg(long)]
         to: Option<String>,
@@ -65,27 +72,27 @@ pub enum Command {
         #[command(subcommand)]
         command: Option<LoopCommand>,
     },
-    /// Pair this receiver or pair with another receiver.
+    /// Open pairing on this node, or pair with another node by address.
     Pair {
-        /// Receiver address to add on this controller.
+        /// Peer address to pair with. Omit to open pairing on this node.
         address: Option<String>,
-        /// Six-digit pairing code shown on the receiver.
+        /// Six-digit pairing code shown on the peer.
         #[arg(long)]
         code: Option<String>,
-        /// This controller's device name stored on the receiver.
-        #[arg(long)]
-        device_name: Option<String>,
-        /// Local alias for the receiver being added.
+        /// This node's name stored on the peer.
+        #[arg(long = "node-name", alias = "device-name")]
+        node_name: Option<String>,
+        /// Local alias for the peer being added.
         #[arg(long)]
         name: Option<String>,
-        /// Select the newly paired receiver without prompting.
+        /// Select the newly paired peer without prompting.
         #[arg(long, conflicts_with = "no_select")]
         select: bool,
-        /// Do not select the newly paired receiver without prompting.
+        /// Do not select the newly paired peer without prompting.
         #[arg(long, conflicts_with = "select")]
         no_select: bool,
     },
-    /// Manage remote and authorized devices.
+    /// Manage playback devices and peer credentials.
     Device {
         #[command(subcommand)]
         command: DeviceCommand,
@@ -95,17 +102,17 @@ pub enum Command {
         #[command(subcommand)]
         command: ConfigCommand,
     },
-    /// Manage receiver tokens.
+    /// Manage legacy peer API tokens.
     Token {
         #[command(subcommand)]
         command: TokenCommand,
     },
-    /// Show current receiver status.
+    /// Show current playback status for the selected device.
     Status {
         #[arg(long)]
         to: Option<String>,
     },
-    /// Show playback history.
+    /// Show playback history for the selected device.
     History {
         #[arg(long)]
         to: Option<String>,
@@ -144,11 +151,15 @@ pub enum ConfigCommand {
         #[arg(long)]
         force: bool,
 
-        /// Receiver URL to write into config.toml.
-        #[arg(long, default_value = "http://127.0.0.1:8765")]
-        receiver_url: String,
+        /// Peer API URL to write into config.toml.
+        #[arg(
+            long = "peer-url",
+            alias = "receiver-url",
+            default_value = "http://127.0.0.1:8765"
+        )]
+        peer_url: String,
 
-        /// Bind address to write into config.toml for ura serve.
+        /// Peer API bind address to write into config.toml for `ura daemon`.
         #[arg(long, default_value = "127.0.0.1:8765")]
         bind: SocketAddr,
     },
@@ -156,41 +167,41 @@ pub enum ConfigCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum TokenCommand {
-    /// Print a new random receiver token.
+    /// Print a new random legacy peer API token.
     Generate,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum DeviceCommand {
-    /// List configured and authorized devices.
+    /// List this device, configured peers, and authorized clients.
     List,
-    /// Add a remote receiver this controller can use.
+    /// Add a peer this node can control.
     Add {
         name: String,
         address: String,
         #[arg(long)]
         token: String,
     },
-    /// Select the default remote receiver.
-    Select { name: String },
-    /// Remove a remote receiver from controller configuration.
+    /// Select the default playback device. Omit NAME for an interactive picker.
+    Select { name: Option<String> },
+    /// Remove a peer from local configuration.
     Remove { name: String },
-    /// Authorize a controller on this receiver.
+    /// Authorize a client on this node.
     Authorize { name: String },
-    /// Revoke a controller credential on this receiver.
+    /// Revoke a client credential on this node.
     Revoke { name: String },
 }
 
 #[cfg(test)]
 mod tests {
-    use clap::CommandFactory;
+    use clap::{CommandFactory, Parser};
 
     use super::*;
 
     #[test]
     fn parses_current_public_commands() {
         for args in [
-            ["ura", "serve"].as_slice(),
+            ["ura", "daemon"].as_slice(),
             ["ura", "play", "https://youtu.be/example"].as_slice(),
             ["ura", "play", "--to", "kamo", "https://youtu.be/example"].as_slice(),
             ["ura", "queue", "https://youtu.be/example"].as_slice(),
@@ -217,7 +228,7 @@ mod tests {
                 "192.168.1.23",
                 "--code",
                 "482913",
-                "--device-name",
+                "--node-name",
                 "desuwa",
                 "--name",
                 "kamo",
@@ -235,6 +246,7 @@ mod tests {
                 "secret",
             ]
             .as_slice(),
+            ["ura", "device", "select"].as_slice(),
             ["ura", "device", "select", "kamo"].as_slice(),
             ["ura", "device", "remove", "kamo"].as_slice(),
             ["ura", "device", "authorize", "desuwa"].as_slice(),
@@ -242,6 +254,13 @@ mod tests {
         ] {
             Cli::try_parse_from(args).expect("current command should parse");
         }
+    }
+
+    #[test]
+    fn legacy_serve_and_receiver_url_aliases_still_parse() {
+        Cli::try_parse_from(["ura", "serve"]).expect("legacy serve alias should parse");
+        Cli::try_parse_from(["ura", "--receiver-url", "http://127.0.0.1:8765", "status"])
+            .expect("legacy receiver-url alias should parse");
     }
 
     #[test]
@@ -261,16 +280,16 @@ mod tests {
             .get_subcommands()
             .map(|command| command.get_name().to_string())
             .collect::<Vec<_>>();
-        for expected in ["serve", "queue", "pause", "resume"] {
+        for expected in ["daemon", "queue", "pause", "resume"] {
             assert!(
                 subcommands.contains(&expected.to_string()),
                 "help should contain {expected}"
             );
         }
-        for removed in ["receive", "enqueue"] {
+        for legacy_or_removed in ["serve", "receive", "enqueue"] {
             assert!(
-                !subcommands.contains(&removed.to_string()),
-                "help should not advertise {removed}"
+                !subcommands.contains(&legacy_or_removed.to_string()),
+                "help should not advertise {legacy_or_removed}"
             );
         }
 
@@ -278,7 +297,27 @@ mod tests {
         let mut help = Vec::new();
         command.write_long_help(&mut help).expect("write help");
         let help = String::from_utf8(help).expect("help should be UTF-8");
-        assert!(help.contains("Add a media URL to the end"));
-        assert!(!help.contains("Add a URL to the playback queue"));
+        assert!(help.contains("Add a media URL to the selected device's playback queue"));
+        assert!(help.contains("Play audio on this or another paired Linux device"));
+    }
+
+    #[test]
+    fn device_select_accepts_interactive_and_named_forms() {
+        Cli::try_parse_from(["ura", "device", "select"])
+            .expect("interactive device select should parse");
+        Cli::try_parse_from(["ura", "device", "select", "living-room"])
+            .expect("named device select should parse");
+    }
+
+    #[test]
+    fn play_to_remains_a_one_shot_override() {
+        Cli::try_parse_from([
+            "ura",
+            "play",
+            "--to",
+            "living-room",
+            "https://youtu.be/example",
+        ])
+        .expect("play --to should parse");
     }
 }

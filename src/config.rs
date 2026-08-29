@@ -11,16 +11,16 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 
 use crate::error::UraError;
-use crate::receiver::validate_receiver_token;
+use crate::peer_api::validate_peer_token;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
-    pub receiver_url: String,
+    pub peer_url: String,
     pub token: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RemoteDevice {
+pub struct Peer {
     pub name: String,
     pub url: String,
     pub token: String,
@@ -30,19 +30,20 @@ pub struct RemoteDevice {
 pub struct DeviceConfig {
     pub local_name: Option<String>,
     pub selected_device: Option<String>,
-    pub devices: Vec<RemoteDevice>,
-    pub legacy_device: Option<RemoteDevice>,
+    pub devices: Vec<Peer>,
+    pub legacy_peer: Option<Peer>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReceiverConfig {
+pub struct NodeConfig {
     pub bind: SocketAddr,
     pub token: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 struct FileConfig {
-    receiver_url: Option<String>,
+    #[serde(alias = "receiver_url")]
+    peer_url: Option<String>,
     token: Option<String>,
     bind: Option<String>,
     local: Option<FileLocal>,
@@ -65,49 +66,40 @@ struct FileDevice {
 impl Config {
     pub fn load_with_overrides(
         config_path: Option<PathBuf>,
-        receiver_url: Option<String>,
+        peer_url: Option<String>,
         token: Option<String>,
     ) -> Result<Self> {
         let file_config = load_file_config(config_path.as_deref())?;
-        Self::from_sources(
-            file_config,
-            receiver_url,
-            token,
-            env_receiver_url(),
-            env_token(),
-        )
+        Self::from_sources(file_config, peer_url, token, env_peer_url(), env_token())
     }
 
     pub fn load_for_device(config_path: Option<PathBuf>, to: Option<String>) -> Result<Self> {
         let file_config = load_file_config(config_path.as_deref())?.unwrap_or_default();
         let device = DeviceConfig::from_file_config(file_config)?.resolve(to.as_deref())?;
         Ok(Self {
-            receiver_url: device.url,
+            peer_url: device.url,
             token: device.token,
         })
     }
 
     fn from_sources(
         file_config: Option<FileConfig>,
-        receiver_url: Option<String>,
+        peer_url: Option<String>,
         token: Option<String>,
-        env_receiver_url: Option<String>,
+        env_peer_url: Option<String>,
         env_token: Option<String>,
     ) -> Result<Self> {
         let file_config = file_config.unwrap_or_default();
-        let receiver_url = receiver_url
-            .or(env_receiver_url)
-            .or(file_config.receiver_url)
-            .ok_or(UraError::MissingConfigField("receiver_url"))?;
+        let peer_url = peer_url
+            .or(env_peer_url)
+            .or(file_config.peer_url)
+            .ok_or(UraError::MissingConfigField("peer_url"))?;
         let token = token
             .or(env_token)
             .or(file_config.token)
             .ok_or(UraError::MissingConfigField("token"))?;
 
-        Ok(Self {
-            receiver_url,
-            token,
-        })
+        Ok(Self { peer_url, token })
     }
 
     pub fn load_token_with_override(token: Option<String>) -> Result<String> {
@@ -139,7 +131,7 @@ impl DeviceConfig {
                 if device.token.trim().is_empty() {
                     anyhow::bail!("device `{}` token must not be empty", device.name);
                 }
-                Ok(RemoteDevice {
+                Ok(Peer {
                     name: device.name,
                     url: device.url,
                     token: device.token,
@@ -156,8 +148,8 @@ impl DeviceConfig {
         if let Some(name) = &local_name {
             validate_device_name(name)?;
         }
-        let legacy_device = match (file_config.receiver_url, file_config.token) {
-            (Some(url), Some(token)) if devices.is_empty() => Some(RemoteDevice {
+        let legacy_peer = match (file_config.peer_url, file_config.token) {
+            (Some(url), Some(token)) if devices.is_empty() => Some(Peer {
                 name: "legacy".to_string(),
                 url,
                 token,
@@ -168,7 +160,7 @@ impl DeviceConfig {
             local_name,
             selected_device: file_config.selected_device,
             devices,
-            legacy_device,
+            legacy_peer,
         })
     }
 
@@ -177,7 +169,7 @@ impl DeviceConfig {
         Self::from_file_config(file_config)
     }
 
-    pub fn resolve(&self, to: Option<&str>) -> Result<RemoteDevice> {
+    pub fn resolve(&self, to: Option<&str>) -> Result<Peer> {
         if let Some(name) = to {
             return self
                 .devices
@@ -185,7 +177,7 @@ impl DeviceConfig {
                 .find(|device| device.name == name)
                 .cloned()
                 .or_else(|| {
-                    self.legacy_device
+                    self.legacy_peer
                         .as_ref()
                         .filter(|device| device.name == name)
                         .cloned()
@@ -202,7 +194,7 @@ impl DeviceConfig {
                 .ok_or_else(|| anyhow::anyhow!("selected device `{selected}` does not exist"));
         }
 
-        if let Some(legacy) = &self.legacy_device {
+        if let Some(legacy) = &self.legacy_peer {
             return Ok(legacy.clone());
         }
 
@@ -221,9 +213,9 @@ impl DeviceConfig {
         if config.devices.iter().any(|device| device.name == name) {
             anyhow::bail!("device `{name}` already exists");
         }
-        config.devices.push(RemoteDevice {
+        config.devices.push(Peer {
             name: name.to_string(),
-            url: normalize_receiver_address(address)?,
+            url: normalize_peer_address(address)?,
             token: token.to_string(),
         });
         write_device_config(&path, &config)
@@ -231,13 +223,13 @@ impl DeviceConfig {
 
     pub fn add_paired(
         config_path: Option<&Path>,
-        receiver_alias: &str,
+        peer_alias: &str,
         address: &str,
         token: &str,
         local_name: &str,
         select: bool,
     ) -> Result<()> {
-        validate_device_name(receiver_alias)?;
+        validate_device_name(peer_alias)?;
         validate_device_name(local_name)?;
         if token.trim().is_empty() {
             anyhow::bail!("device token must not be empty");
@@ -247,18 +239,18 @@ impl DeviceConfig {
         if config
             .devices
             .iter()
-            .any(|device| device.name == receiver_alias)
+            .any(|device| device.name == peer_alias)
         {
-            anyhow::bail!("device `{receiver_alias}` already exists");
+            anyhow::bail!("device `{peer_alias}` already exists");
         }
         config.local_name = Some(local_name.to_string());
-        config.devices.push(RemoteDevice {
-            name: receiver_alias.to_string(),
-            url: normalize_receiver_address(address)?,
+        config.devices.push(Peer {
+            name: peer_alias.to_string(),
+            url: normalize_peer_address(address)?,
             token: token.to_string(),
         });
         if select {
-            config.selected_device = Some(receiver_alias.to_string());
+            config.selected_device = Some(peer_alias.to_string());
         }
         write_device_config(&path, &config)
     }
@@ -288,7 +280,7 @@ impl DeviceConfig {
     }
 }
 
-impl ReceiverConfig {
+impl NodeConfig {
     pub fn load_with_overrides(
         config_path: Option<PathBuf>,
         bind: Option<SocketAddr>,
@@ -319,7 +311,7 @@ impl ReceiverConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigInit {
     pub config_path: Option<PathBuf>,
-    pub receiver_url: String,
+    pub peer_url: String,
     pub bind: SocketAddr,
     pub token: Option<String>,
     pub force: bool,
@@ -339,7 +331,7 @@ fn init_config_at_path(path: &Path, init: ConfigInit) -> Result<PathBuf> {
         Some(token) => token,
         None => generate_token()?,
     };
-    validate_receiver_token(&token)?;
+    validate_peer_token(&token)?;
 
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
@@ -347,9 +339,9 @@ fn init_config_at_path(path: &Path, init: ConfigInit) -> Result<PathBuf> {
     }
 
     let contents = format!(
-        "token = \"{}\"\nreceiver_url = \"{}\"\nbind = \"{}\"\n",
+        "token = \"{}\"\npeer_url = \"{}\"\nbind = \"{}\"\n",
         toml_escape_string(&token),
-        toml_escape_string(&init.receiver_url),
+        toml_escape_string(&init.peer_url),
         init.bind
     );
 
@@ -371,10 +363,10 @@ fn init_config_at_path(path: &Path, init: ConfigInit) -> Result<PathBuf> {
     Ok(path.to_path_buf())
 }
 
-pub fn normalize_receiver_address(address: &str) -> Result<String> {
+pub fn normalize_peer_address(address: &str) -> Result<String> {
     let address = address.trim();
     if address.is_empty() || address.chars().any(char::is_whitespace) {
-        anyhow::bail!("receiver address must not be empty or contain whitespace");
+        anyhow::bail!("peer address must not be empty or contain whitespace");
     }
     let candidate = if address.contains("://") {
         address.to_string()
@@ -383,19 +375,19 @@ pub fn normalize_receiver_address(address: &str) -> Result<String> {
     };
     let rest = candidate
         .strip_prefix("http://")
-        .ok_or_else(|| anyhow::anyhow!("unsupported receiver address scheme"))?;
+        .ok_or_else(|| anyhow::anyhow!("unsupported peer address scheme"))?;
     if rest.contains("://") {
-        anyhow::bail!("unsupported receiver address scheme");
+        anyhow::bail!("unsupported peer address scheme");
     }
     if rest.contains('?') || rest.contains('#') {
-        anyhow::bail!("receiver address must not include a query or fragment");
+        anyhow::bail!("peer address must not include a query or fragment");
     }
     let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
     if !path.is_empty() {
-        anyhow::bail!("receiver address must not include a path");
+        anyhow::bail!("peer address must not include a path");
     }
     if authority.contains('@') {
-        anyhow::bail!("receiver address must not include username or password");
+        anyhow::bail!("peer address must not include username or password");
     }
     let (host, port) = match authority.rsplit_once(':') {
         Some((host, port)) if !port.is_empty() && port.chars().all(|ch| ch.is_ascii_digit()) => (
@@ -523,7 +515,7 @@ fn write_device_config(path: &Path, config: &DeviceConfig) -> Result<()> {
     Ok(())
 }
 
-fn validate_unique_device_names(devices: &[RemoteDevice]) -> Result<()> {
+fn validate_unique_device_names(devices: &[Peer]) -> Result<()> {
     let mut names = std::collections::HashSet::new();
     for device in devices {
         if !names.insert(device.name.as_str()) {
@@ -546,7 +538,7 @@ fn validate_host(host: &str) -> Result<()> {
             .chars()
             .any(|ch| !(ch.is_ascii_alphanumeric() || ch == '.' || ch == '-'))
     {
-        anyhow::bail!("invalid receiver address host");
+        anyhow::bail!("invalid peer address host");
     }
     Ok(())
 }
@@ -574,8 +566,10 @@ pub fn default_bind() -> SocketAddr {
         .expect("default bind address should be valid")
 }
 
-fn env_receiver_url() -> Option<String> {
-    env::var("URA_RECEIVER_URL").ok()
+fn env_peer_url() -> Option<String> {
+    env::var("URA_PEER_URL")
+        .ok()
+        .or_else(|| env::var("URA_RECEIVER_URL").ok())
 }
 
 fn env_token() -> Option<String> {
@@ -634,7 +628,7 @@ pub fn default_device_name() -> String {
 #[cfg(test)]
 pub fn load_config_from_path_with_overrides(
     path: &std::path::Path,
-    receiver_url: Option<String>,
+    peer_url: Option<String>,
     token: Option<String>,
 ) -> Result<Config> {
     let file_config = if path.exists() {
@@ -648,7 +642,7 @@ pub fn load_config_from_path_with_overrides(
         None
     };
 
-    Config::from_sources(file_config, receiver_url, token, None, None)
+    Config::from_sources(file_config, peer_url, token, None, None)
 }
 
 #[cfg(test)]
@@ -669,7 +663,7 @@ mod tests {
         fs::write(
             &path,
             r#"
-receiver_url = "http://127.0.0.1:8765"
+peer_url = "http://127.0.0.1:8765"
 token = "secret"
 "#,
         )
@@ -681,10 +675,29 @@ token = "secret"
         assert_eq!(
             config,
             Config {
-                receiver_url: "http://127.0.0.1:8765".to_string(),
+                peer_url: "http://127.0.0.1:8765".to_string(),
                 token: "secret".to_string(),
             }
         );
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn loads_legacy_receiver_url_key() {
+        let path = unique_path("legacy-receiver-url");
+        fs::write(
+            &path,
+            r#"
+receiver_url = "http://127.0.0.1:8765"
+token = "secret"
+"#,
+        )
+        .expect("write legacy config");
+
+        let config =
+            load_config_from_path_with_overrides(&path, None, None).expect("load legacy config");
+        assert_eq!(config.peer_url, "http://127.0.0.1:8765");
 
         let _ = fs::remove_file(path);
     }
@@ -695,7 +708,7 @@ token = "secret"
         fs::write(
             &path,
             r#"
-receiver_url = "http://127.0.0.1:8765"
+peer_url = "http://127.0.0.1:8765"
 token = "secret"
 "#,
         )
@@ -708,7 +721,7 @@ token = "secret"
         )
         .expect("load test config");
 
-        assert_eq!(config.receiver_url, "http://receiver.example");
+        assert_eq!(config.peer_url, "http://receiver.example");
         assert_eq!(config.token, "override");
 
         let _ = fs::remove_file(path);
@@ -717,7 +730,7 @@ token = "secret"
     #[test]
     fn env_overrides_client_config_file() {
         let file_config = Some(FileConfig {
-            receiver_url: Some("http://config.example".to_string()),
+            peer_url: Some("http://config.example".to_string()),
             token: Some("config-token".to_string()),
             bind: None,
             ..FileConfig::default()
@@ -732,14 +745,14 @@ token = "secret"
         )
         .expect("load config");
 
-        assert_eq!(config.receiver_url, "http://env.example");
+        assert_eq!(config.peer_url, "http://env.example");
         assert_eq!(config.token, "env-token");
     }
 
     #[test]
     fn cli_overrides_env_and_client_config_file() {
         let file_config = Some(FileConfig {
-            receiver_url: Some("http://config.example".to_string()),
+            peer_url: Some("http://config.example".to_string()),
             token: Some("config-token".to_string()),
             bind: None,
             ..FileConfig::default()
@@ -754,15 +767,15 @@ token = "secret"
         )
         .expect("load config");
 
-        assert_eq!(config.receiver_url, "http://cli.example");
+        assert_eq!(config.peer_url, "http://cli.example");
         assert_eq!(config.token, "cli-token");
     }
 
     #[test]
-    fn receiver_reads_token_and_bind_from_config_file() {
-        let config = ReceiverConfig::from_sources(
+    fn node_reads_token_and_bind_from_config_file() {
+        let config = NodeConfig::from_sources(
             Some(FileConfig {
-                receiver_url: None,
+                peer_url: None,
                 token: Some("0123456789abcdef0123456789abcdef".to_string()),
                 bind: Some("127.0.0.1:9999".to_string()),
                 ..FileConfig::default()
@@ -771,7 +784,7 @@ token = "secret"
             None,
             None,
         )
-        .expect("load receiver config");
+        .expect("load node config");
 
         assert_eq!(config.bind, "127.0.0.1:9999".parse().expect("parse bind"));
         assert_eq!(
@@ -781,10 +794,10 @@ token = "secret"
     }
 
     #[test]
-    fn receiver_defaults_bind_when_config_omits_it() {
-        let config = ReceiverConfig::from_sources(
+    fn node_defaults_bind_when_config_omits_it() {
+        let config = NodeConfig::from_sources(
             Some(FileConfig {
-                receiver_url: None,
+                peer_url: None,
                 token: Some("0123456789abcdef0123456789abcdef".to_string()),
                 bind: None,
                 ..FileConfig::default()
@@ -793,16 +806,16 @@ token = "secret"
             None,
             None,
         )
-        .expect("load receiver config");
+        .expect("load node config");
 
         assert_eq!(config.bind, default_bind());
     }
 
     #[test]
-    fn receiver_can_omit_legacy_token() {
-        let config = ReceiverConfig::from_sources(
+    fn node_can_omit_legacy_token() {
+        let config = NodeConfig::from_sources(
             Some(FileConfig {
-                receiver_url: None,
+                peer_url: None,
                 token: None,
                 bind: None,
                 ..FileConfig::default()
@@ -811,16 +824,16 @@ token = "secret"
             None,
             None,
         )
-        .expect("load receiver config");
+        .expect("load node config");
 
         assert_eq!(config.token, None);
     }
 
     #[test]
-    fn env_overrides_receiver_config_file() {
-        let config = ReceiverConfig::from_sources(
+    fn env_overrides_node_config_file() {
+        let config = NodeConfig::from_sources(
             Some(FileConfig {
-                receiver_url: None,
+                peer_url: None,
                 token: Some("config-token".to_string()),
                 bind: Some("127.0.0.1:9999".to_string()),
                 ..FileConfig::default()
@@ -829,17 +842,17 @@ token = "secret"
             Some("env-token".to_string()),
             Some(Ok("127.0.0.1:7777".parse().expect("parse bind"))),
         )
-        .expect("load receiver config");
+        .expect("load node config");
 
         assert_eq!(config.bind, "127.0.0.1:7777".parse().expect("parse bind"));
         assert_eq!(config.token.as_deref(), Some("env-token"));
     }
 
     #[test]
-    fn cli_overrides_env_and_receiver_config_file() {
-        let config = ReceiverConfig::from_sources(
+    fn cli_overrides_env_and_node_config_file() {
+        let config = NodeConfig::from_sources(
             Some(FileConfig {
-                receiver_url: None,
+                peer_url: None,
                 token: Some("config-token".to_string()),
                 bind: Some("127.0.0.1:9999".to_string()),
                 ..FileConfig::default()
@@ -848,7 +861,7 @@ token = "secret"
             Some("cli-token".to_string()),
             Some(Ok("127.0.0.1:7777".parse().expect("parse bind"))),
         )
-        .expect("load receiver config");
+        .expect("load node config");
 
         assert_eq!(config.bind, "127.0.0.1:6666".parse().expect("parse bind"));
         assert_eq!(config.token.as_deref(), Some("cli-token"));
@@ -868,15 +881,15 @@ token = "secret"
     }
 
     #[test]
-    fn receive_can_load_token_without_receiver_url() {
+    fn node_can_load_legacy_token_without_peer_url() {
         let file_config = FileConfig {
-            receiver_url: None,
+            peer_url: None,
             token: Some("secret".to_string()),
             bind: None,
             ..FileConfig::default()
         };
 
-        let token = Config::token_from_parts(file_config, None).expect("load receiver token");
+        let token = Config::token_from_parts(file_config, None).expect("load peer API token");
 
         assert_eq!(token, "secret");
     }
@@ -889,7 +902,7 @@ token = "secret"
             &path,
             ConfigInit {
                 config_path: None,
-                receiver_url: "http://127.0.0.1:8765".to_string(),
+                peer_url: "http://127.0.0.1:8765".to_string(),
                 bind: default_bind(),
                 token: None,
                 force: false,
@@ -900,9 +913,9 @@ token = "secret"
         assert_eq!(created, path);
         let config =
             load_config_from_path_with_overrides(&created, None, None).expect("load new config");
-        assert_eq!(config.receiver_url, "http://127.0.0.1:8765");
+        assert_eq!(config.peer_url, "http://127.0.0.1:8765");
         assert!(config.token.len() >= 32);
-        crate::receiver::validate_receiver_token(&config.token).expect("generated token is valid");
+        crate::peer_api::validate_peer_token(&config.token).expect("generated token is valid");
         assert!(
             fs::read_to_string(&created)
                 .expect("read new config")
@@ -913,11 +926,11 @@ token = "secret"
     }
 
     #[test]
-    fn token_generate_produces_valid_receiver_token() {
+    fn token_generate_produces_valid_peer_api_token() {
         let token = generate_token().expect("generate token");
 
         assert!(token.len() >= 32);
-        crate::receiver::validate_receiver_token(&token).expect("generated token is valid");
+        crate::peer_api::validate_peer_token(&token).expect("generated token is valid");
     }
 
     #[test]
@@ -926,7 +939,7 @@ token = "secret"
         fs::write(
             &path,
             r#"
-receiver_url = "http://old.example"
+peer_url = "http://old.example"
 token = "old-token"
 "#,
         )
@@ -936,7 +949,7 @@ token = "old-token"
             &path,
             ConfigInit {
                 config_path: None,
-                receiver_url: "http://127.0.0.1:8765".to_string(),
+                peer_url: "http://127.0.0.1:8765".to_string(),
                 bind: default_bind(),
                 token: Some("0123456789abcdef0123456789abcdef".to_string()),
                 force: false,
@@ -963,7 +976,7 @@ token = "old-token"
         fs::write(
             &path,
             r#"
-receiver_url = "http://old.example"
+peer_url = "http://old.example"
 token = "0123456789abcdef0123456789abcdef"
 "#,
         )
@@ -973,7 +986,7 @@ token = "0123456789abcdef0123456789abcdef"
             &path,
             ConfigInit {
                 config_path: None,
-                receiver_url: "http://127.0.0.1:8765".to_string(),
+                peer_url: "http://127.0.0.1:8765".to_string(),
                 bind: default_bind(),
                 token: Some("abcdef0123456789abcdef0123456789".to_string()),
                 force: true,
@@ -983,38 +996,38 @@ token = "0123456789abcdef0123456789abcdef"
 
         let config = load_config_from_path_with_overrides(&path, None, None)
             .expect("load overwritten config");
-        assert_eq!(config.receiver_url, "http://127.0.0.1:8765");
+        assert_eq!(config.peer_url, "http://127.0.0.1:8765");
         assert_eq!(config.token, "abcdef0123456789abcdef0123456789");
 
         let _ = fs::remove_file(path);
     }
 
     #[test]
-    fn normalizes_receiver_addresses() {
+    fn normalizes_peer_addresses() {
         assert_eq!(
-            normalize_receiver_address("192.168.1.23").expect("normalize"),
+            normalize_peer_address("192.168.1.23").expect("normalize"),
             "http://192.168.1.23:8765"
         );
         assert_eq!(
-            normalize_receiver_address("http://192.168.1.23").expect("normalize"),
+            normalize_peer_address("http://192.168.1.23").expect("normalize"),
             "http://192.168.1.23:8765"
         );
         assert_eq!(
-            normalize_receiver_address("kamo:9999").expect("normalize"),
+            normalize_peer_address("kamo:9999").expect("normalize"),
             "http://kamo:9999"
         );
         assert_eq!(
-            normalize_receiver_address("kamo.local").expect("normalize"),
+            normalize_peer_address("kamo.local").expect("normalize"),
             "http://kamo.local:8765"
         );
         assert_eq!(
-            normalize_receiver_address("http://kamo/").expect("normalize"),
+            normalize_peer_address("http://kamo/").expect("normalize"),
             "http://kamo:8765"
         );
     }
 
     #[test]
-    fn rejects_invalid_receiver_addresses() {
+    fn rejects_invalid_peer_addresses() {
         for address in [
             "https://kamo",
             "http://kamo/path",
@@ -1022,7 +1035,7 @@ token = "0123456789abcdef0123456789abcdef"
             "http://kamo#fragment",
             "http://user@kamo",
         ] {
-            normalize_receiver_address(address).expect_err("address should fail");
+            normalize_peer_address(address).expect_err("address should fail");
         }
     }
 
@@ -1088,12 +1101,12 @@ token = "dane-token"
         let config = DeviceConfig {
             local_name: None,
             selected_device: None,
-            devices: vec![RemoteDevice {
+            devices: vec![Peer {
                 name: "kamo".to_string(),
                 url: "http://kamo:8765".to_string(),
                 token: "token".to_string(),
             }],
-            legacy_device: None,
+            legacy_peer: None,
         };
 
         let error = config.resolve(None).expect_err("missing selection");
@@ -1158,14 +1171,14 @@ token = "dane-token"
     fn legacy_flat_config_falls_back_without_rewrite() {
         let path = unique_path("legacy-config");
         let contents = r#"
-receiver_url = "http://127.0.0.1:8765"
+peer_url = "http://127.0.0.1:8765"
 token = "legacy-token"
 "#;
         fs::write(&path, contents).expect("write legacy config");
 
         let config = Config::load_for_device(Some(path.clone()), None).expect("load legacy");
 
-        assert_eq!(config.receiver_url, "http://127.0.0.1:8765");
+        assert_eq!(config.peer_url, "http://127.0.0.1:8765");
         assert_eq!(config.token, "legacy-token");
         assert_eq!(
             fs::read_to_string(&path).expect("read legacy config"),
