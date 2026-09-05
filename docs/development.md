@@ -1,6 +1,6 @@
 # Development
 
-Status: Current `0.3.0` behavior.
+Status: Current `0.3.1` behavior.
 
 Use the project Nix flake for development and validation commands that need the
 expected toolchain or runtime tools.
@@ -129,7 +129,7 @@ cover:
     is unreachable.
 
 The Firefox host permission should remain restricted to localhost. The browser
-control API is fixed to `127.0.0.1:8766` in `0.3.0` and should never bind to the
+control API is fixed to `127.0.0.1:8766` in `0.3.1` and should never bind to the
 peer API's LAN address.
 
 ## Fake mpv Lifecycle Tests

@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "ura",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Send the current tab URL through your local ura node.",
   "permissions": [
     "activeTab",

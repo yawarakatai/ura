@@ -619,8 +619,9 @@ fn print_history(history: &[HistoryEntry]) {
     println!("{:<20}  {:<28}  SOURCE", "TIMESTAMP", "TITLE");
     for entry in history {
         let timestamp = entry
-            .last_played_at
+            .display_played_at
             .as_deref()
+            .or(entry.last_played_at.as_deref())
             .unwrap_or(entry.created_at.as_str());
         let title = entry.title.as_deref().unwrap_or("Unknown title");
         println!(

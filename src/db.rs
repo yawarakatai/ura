@@ -28,6 +28,7 @@ pub struct HistoryEntry {
     pub thumbnail_url: Option<String>,
     pub created_at: String,
     pub last_played_at: Option<String>,
+    pub display_played_at: Option<String>,
     pub play_count: i64,
 }
 
@@ -178,10 +179,12 @@ impl Database {
                 duration,
                 thumbnail_url,
                 created_at,
-                last_played_at,
-                play_count
-             FROM tracks
-             ORDER BY last_played_at DESC, created_at DESC",
+                plays.played_at,
+                datetime(CAST(plays.played_at AS INTEGER), 'unixepoch', 'localtime'),
+                tracks.play_count
+             FROM plays
+             JOIN tracks ON tracks.id = plays.track_id
+             ORDER BY CAST(plays.played_at AS INTEGER) DESC, plays.id DESC",
         )?;
 
         let rows = statement.query_map([], |row| {
@@ -195,7 +198,8 @@ impl Database {
                 thumbnail_url: row.get(6)?,
                 created_at: row.get(7)?,
                 last_played_at: row.get(8)?,
-                play_count: row.get(9)?,
+                display_played_at: row.get(9)?,
+                play_count: row.get(10)?,
             })
         })?;
 
@@ -423,6 +427,12 @@ mod tests {
         assert_eq!(history[0].source_url, "https://youtu.be/example");
         assert_eq!(history[0].play_url, "https://youtu.be/example");
         assert_eq!(history[0].play_count, 1);
+        assert!(
+            history[0]
+                .display_played_at
+                .as_deref()
+                .is_some_and(|timestamp| timestamp.contains('-') && timestamp.contains(':'))
+        );
 
         let _ = fs::remove_file(path);
     }
@@ -448,8 +458,9 @@ mod tests {
             .expect("record second play");
 
         let history = database.history().expect("read history");
-        assert_eq!(history.len(), 1);
+        assert_eq!(history.len(), 2);
         assert_eq!(history[0].play_count, 2);
+        assert_eq!(history[1].play_count, 2);
 
         let _ = fs::remove_file(path);
     }

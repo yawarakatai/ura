@@ -1,6 +1,6 @@
 # Deployment
 
-Status: Current `0.3.0` behavior.
+Status: Current `0.3.1` behavior.
 
 This document covers running `ura daemon` as the long-lived local ura node.
 Tailscale or another private overlay can be used for peer traffic, but is not a
@@ -105,7 +105,7 @@ separate browser control listener:
 127.0.0.1:8766
 ```
 
-The browser listener is not configurable in `0.3.0` and remains loopback-only.
+The browser listener is not configurable in `0.3.1` and remains loopback-only.
 It is never widened when the peer API is exposed.
 
 ## Exposing A Peer

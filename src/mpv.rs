@@ -174,7 +174,7 @@ impl MpvClient {
 
     pub fn load_replace(&mut self, url: &str) -> Result<()> {
         self.send_command(loadfile_command(url, LoadMode::Replace))?;
-        Ok(())
+        self.set_pause(false)
     }
 
     pub fn load_enqueue(&mut self, url: &str) -> Result<()> {
@@ -551,6 +551,17 @@ fn observe_events(
     stream.flush()?;
     debug!("mpv IPC observer registered properties");
 
+    // A file can finish loading before the observer has registered, or while it
+    // is reconnecting. Reconcile the snapshot so its pending request is not
+    // permanently omitted from history.
+    match MpvClient::connect(socket_path).and_then(|mut client| client.metadata_snapshot()) {
+        Ok(snapshot) if snapshot.idle_active != Some(true) && snapshot.path.is_some() => {
+            handle_file_loaded(snapshot, database, state)?;
+        }
+        Ok(_) => {}
+        Err(error) => warn!(error = %error, "failed to reconcile mpv state"),
+    }
+
     let mut reader = BufReader::new(stream.try_clone()?);
     while !shutdown.load(Ordering::Relaxed) {
         let mut line = String::new();
@@ -613,31 +624,42 @@ fn handle_file_loaded(
     database: &Database,
     state: &SharedPlaybackState,
 ) -> Result<()> {
-    let (source_url, play_url, source, metadata) = {
+    let (pending, source_url, metadata) = {
         let mut state = state.lock().expect("playback state lock poisoned");
         apply_snapshot(&mut state, snapshot);
         let pending = take_matching_pending(&mut state);
-        if let Some(pending) = pending {
+        if let Some(pending) = &pending {
             state.current_source_url = Some(pending.source_url.clone());
             state.current_play_url = Some(pending.play_url.clone());
             state.current_source = pending.source.clone();
         }
         let source_url = state.current_source_url.clone();
-        let play_url = state.current_play_url.clone();
-        let source = state.current_source.clone();
         refresh_normalized_metadata(&mut state);
         let metadata = state.normalized_metadata.clone();
-        (source_url, play_url, source, metadata)
+        (pending, source_url, metadata)
     };
 
-    let (Some(source_url), Some(play_url)) = (source_url, play_url) else {
+    let Some(source_url) = source_url else {
         debug!("metadata_missing");
         return Ok(());
     };
 
-    database.record_play(&source_url, &play_url, source.as_deref())?;
+    if let Some(pending) = pending {
+        if let Err(error) = database.record_play(
+            &pending.source_url,
+            &pending.play_url,
+            pending.source.as_deref(),
+        ) {
+            state
+                .lock()
+                .expect("playback state lock poisoned")
+                .pending
+                .push_front(pending);
+            return Err(error);
+        }
+        debug!("media_loaded");
+    }
     database.update_track_metadata(&source_url, &metadata)?;
-    debug!("media_loaded");
     Ok(())
 }
 
@@ -1054,6 +1076,44 @@ mod tests {
     }
 
     #[test]
+    fn replace_load_starts_playback_when_previously_paused() {
+        let socket_path = unique_socket_path("replace-unpauses");
+        let listener = UnixListener::bind(&socket_path).expect("bind fake mpv socket");
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept mpv client");
+            let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+            let mut commands = Vec::new();
+            for _ in 0..2 {
+                let mut request = String::new();
+                reader.read_line(&mut request).expect("read command");
+                let request: Value = serde_json::from_str(&request).expect("parse command");
+                let request_id = request
+                    .get("request_id")
+                    .and_then(Value::as_u64)
+                    .expect("request id");
+                commands.push(request.get("command").cloned().expect("command"));
+                writeln!(stream, r#"{{"request_id":{request_id},"error":"success"}}"#)
+                    .expect("write response");
+            }
+            commands
+        });
+
+        let mut client = MpvClient::connect(&socket_path).expect("connect fake mpv");
+        client
+            .load_replace("https://youtu.be/example")
+            .expect("replace load");
+
+        assert_eq!(
+            handle.join().expect("join fake mpv"),
+            vec![
+                json!(["loadfile", "https://youtu.be/example", "replace"]),
+                json!(["set_property", "pause", false]),
+            ]
+        );
+        let _ = fs::remove_file(socket_path);
+    }
+
+    #[test]
     fn normalizes_case_insensitive_metadata() {
         let metadata = HashMap::from([
             ("title".to_string(), "Example song".to_string()),
@@ -1275,6 +1335,32 @@ mod tests {
         assert_eq!(history[0].source_url, "https://youtu.be/second");
         assert_eq!(history[0].title.as_deref(), Some("Second song"));
 
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn reconciling_an_already_recorded_file_does_not_duplicate_history() {
+        let path = unique_db_path("reconciled-track");
+        let database = Database::open(path.clone()).expect("open database");
+        let state = shared_playback_state();
+        register_playback_request(
+            &state,
+            "https://youtu.be/example".to_string(),
+            "https://youtu.be/example".to_string(),
+            Some("cli".to_string()),
+            QueueMode::Replace,
+        );
+        let snapshot = MetadataSnapshot {
+            path: Some("https://youtu.be/example".to_string()),
+            media_title: Some("Example song".to_string()),
+            idle_active: Some(false),
+            ..MetadataSnapshot::default()
+        };
+
+        handle_file_loaded(snapshot.clone(), &database, &state).expect("initial file load");
+        handle_file_loaded(snapshot, &database, &state).expect("reconciled file load");
+
+        assert_eq!(database.history().expect("read history").len(), 1);
         let _ = fs::remove_file(path);
     }
 

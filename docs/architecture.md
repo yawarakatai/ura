@@ -1,6 +1,6 @@
 # Architecture
 
-Status: Current `0.3.0` behavior.
+Status: Current `0.3.1` behavior.
 
 `ura` is a small Linux audio node. Each machine can play audio itself and can
 route local commands to a paired peer. Nodes do not have fixed sending or
@@ -134,7 +134,7 @@ does not enter this routing boundary.
 
 ## Browser Control API
 
-Firefox does not store or contact remote peers directly in `0.3.0`. It talks
+Firefox does not store or contact remote peers directly in `0.3.1`. It talks
 only to:
 
 ```text
@@ -170,7 +170,7 @@ POST /v1/pair/claim
 
 They proxy the already-running node's pairing session; they do not create a new
 pairing mechanism or expose a way to start pairing over HTTP. Because this
-loopback API is new in `0.3.0`, its pairing responses use `node_name` directly.
+loopback API is new in `0.3.1`, its pairing responses use `node_name` directly.
 
 The Firefox manifest host permission is restricted to localhost.
 
@@ -251,9 +251,11 @@ observes structured properties including media title, duration, metadata, path,
 pause, idle state, playlist position/count, and playback position.
 
 On `file-loaded`, ura associates the loaded item with a pending play or queue
-request and records the successful play. Later property changes can enrich the
-same current-track metadata. Human-readable mpv logs are not parsed for runtime
-state.
+request and records the successful play. The observer also reconciles mpv's
+current structured-property snapshot when it connects, so a load completed
+during observer startup or reconnection is not omitted. Later property changes
+can enrich the same current-track metadata. Human-readable mpv logs are not
+parsed for runtime state.
 
 ## SQLite
 
@@ -264,7 +266,9 @@ $XDG_DATA_HOME/ura/ura.db
 fallback: ~/.local/share/ura/ura.db
 ```
 
-Playback history uses `tracks` and `plays` tables. Authorized local/peer clients
+Playback history uses `tracks` and `plays` tables. History is returned as
+individual play events in reverse chronological order, including repeated plays
+of the same URL. Authorized local/peer clients
 are stored in the existing `authorized_devices` table using SHA-256 token hashes,
 creation time, coarse `last_seen_at`, and optional revocation time. The table
 name is retained as an on-disk schema compatibility detail; the Rust API calls
