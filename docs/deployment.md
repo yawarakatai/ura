@@ -1,6 +1,6 @@
 # Deployment
 
-Status: Current `0.3.1` behavior.
+Status: Current `0.4.0` behavior.
 
 This document covers running `ura daemon` as the long-lived local ura node.
 Tailscale or another private overlay can be used for peer traffic, but is not a
@@ -34,9 +34,6 @@ mkdir -p ~/.config/ura
 
 cp contrib/systemd/ura.service ~/.config/systemd/user/ura.service
 cp contrib/systemd/ura.env.example ~/.config/ura/ura.env
-
-ura config init
-$EDITOR ~/.config/ura/config.toml
 
 systemctl --user daemon-reload
 systemctl --user enable --now ura.service
@@ -84,7 +81,7 @@ The flake exports a Home Manager module:
 ```
 
 With the module enabled, the local ura node starts as a systemd user service, so
-normal commands such as `ura play` do not require manually running `ura daemon`.
+playing a URL with `ura <URL>` does not require manually running `ura daemon`.
 
 The module installs ura and adds mpv and yt-dlp to the service PATH.
 `services.ura.package`, `services.ura.bind`, and `services.ura.logLevel` can be
@@ -105,7 +102,7 @@ separate browser control listener:
 127.0.0.1:8766
 ```
 
-The browser listener is not configurable in `0.3.1` and remains loopback-only.
+The browser listener is not configurable in `0.4.0` and remains loopback-only.
 It is never widened when the peer API is exposed.
 
 ## Exposing A Peer
@@ -188,21 +185,12 @@ inside ura configuration and are never copied into new extension state.
 Revoking Firefox's authorized-client credential causes the extension to request
 pairing again.
 
-## Compatibility Credentials
+## Credentials
 
 Authorized clients are stored in the SQLite database under `XDG_DATA_HOME` or
-`~/.local/share/ura/ura.db` as token hashes.
-
-The legacy top-level peer API token and `receiver_url` settings remain readable
-for compatibility:
-
-```toml
-token = "..."
-receiver_url = "http://192.168.1.20:8765"
-```
-
-The legacy peer API token is accepted only by the peer HTTP compatibility path;
-the loopback browser API authenticates against authorized-client credentials.
+`~/.local/share/ura/ura.db` as token hashes. Peer credentials are stored in
+`[[devices]]` entries. Legacy top-level `token` and `receiver_url` fields are no
+longer used.
 
 ## Troubleshooting
 
@@ -224,8 +212,8 @@ which mpv
 which yt-dlp
 ```
 
-If `ura play` reports that this device is selected but the local node is not
-running, start the user service:
+If `ura <URL>` reports that the local node is not running, start the user
+service:
 
 ```bash
 systemctl --user start ura.service

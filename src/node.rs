@@ -62,14 +62,24 @@ pub struct DeviceSet {
 #[serde(tag = "command", rename_all = "snake_case")]
 enum NodeRequest {
     Ping,
-    Play { url: String, to: Option<String> },
-    Queue { url: String, to: Option<String> },
-    Control { action: String, to: Option<String> },
-    LoopStatus { to: Option<String> },
-    Status { to: Option<String> },
-    History { to: Option<String> },
+    Play {
+        url: String,
+        #[serde(default)]
+        loop_track: bool,
+    },
+    Queue {
+        url: String,
+    },
+    Control {
+        action: String,
+    },
+    LoopStatus,
+    Status,
+    History,
     Devices,
-    Select { name: String },
+    Select {
+        name: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -108,49 +118,45 @@ impl NodeClient {
             .is_ok()
     }
 
-    pub fn play(&self, url: &str, to: Option<&str>) -> Result<()> {
+    pub fn play(&self, url: &str) -> Result<()> {
+        self.play_with_loop(url, false)
+    }
+
+    pub fn play_with_loop(&self, url: &str, loop_track: bool) -> Result<()> {
         self.expect_ok(NodeRequest::Play {
             url: url.to_string(),
-            to: to.map(str::to_string),
+            loop_track,
         })
     }
 
-    pub fn queue(&self, url: &str, to: Option<&str>) -> Result<()> {
+    pub fn queue(&self, url: &str) -> Result<()> {
         self.expect_ok(NodeRequest::Queue {
             url: url.to_string(),
-            to: to.map(str::to_string),
         })
     }
 
-    pub fn control(&self, action: &str, to: Option<&str>) -> Result<()> {
+    pub fn control(&self, action: &str) -> Result<()> {
         self.expect_ok(NodeRequest::Control {
             action: action.to_string(),
-            to: to.map(str::to_string),
         })
     }
 
-    pub fn loop_status(&self, to: Option<&str>) -> Result<LoopStatus> {
-        match self.request(NodeRequest::LoopStatus {
-            to: to.map(str::to_string),
-        })? {
+    pub fn loop_status(&self) -> Result<LoopStatus> {
+        match self.request(NodeRequest::LoopStatus)? {
             NodeResponse::LoopStatus { status } => Ok(status),
             other => unexpected_response(other),
         }
     }
 
-    pub fn status(&self, to: Option<&str>) -> Result<MpvStatus> {
-        match self.request(NodeRequest::Status {
-            to: to.map(str::to_string),
-        })? {
+    pub fn status(&self) -> Result<MpvStatus> {
+        match self.request(NodeRequest::Status)? {
             NodeResponse::Status { status } => Ok(*status),
             other => unexpected_response(other),
         }
     }
 
-    pub fn history(&self, to: Option<&str>) -> Result<Vec<HistoryEntry>> {
-        match self.request(NodeRequest::History {
-            to: to.map(str::to_string),
-        })? {
+    pub fn history(&self) -> Result<Vec<HistoryEntry>> {
+        match self.request(NodeRequest::History)? {
             NodeResponse::History { entries } => Ok(entries),
             other => unexpected_response(other),
         }
@@ -205,12 +211,8 @@ fn unexpected_response<T>(response: NodeResponse) -> Result<T> {
     anyhow::bail!("ura node returned an unexpected response: {response:?}")
 }
 
-pub async fn run_node(
-    bind: SocketAddr,
-    token: Option<String>,
-    config_path: Option<PathBuf>,
-) -> Result<()> {
-    let local_token = token.unwrap_or(generate_token()?);
+pub async fn run_node(bind: SocketAddr, config_path: Option<PathBuf>) -> Result<()> {
+    let local_token = generate_token()?;
     let local_url = local_url_for_bind(bind);
     let runtime = Arc::new(NodeRuntime {
         local_url: local_url.clone(),
@@ -219,7 +221,7 @@ pub async fn run_node(
     });
 
     info!("node startup");
-    let mut peer_api_task = tokio::spawn(run_peer_api(bind, Some(local_token)));
+    let mut peer_api_task = tokio::spawn(run_peer_api(bind, local_token));
     wait_for_peer_api(bind, &mut peer_api_task).await?;
 
     let (node_shutdown, node_shutdown_rx) = oneshot::channel();
@@ -355,30 +357,33 @@ async fn handle_node_connection(
 async fn dispatch(request: NodeRequest, runtime: &NodeRuntime) -> Result<NodeResponse> {
     match request {
         NodeRequest::Ping => Ok(NodeResponse::Ok),
-        NodeRequest::Play { url, to } => {
-            route(runtime, to, move |client| client.play(&url)).await?;
+        NodeRequest::Play { url, loop_track } => {
+            route(runtime, move |client| {
+                client.play_with_loop(&url, loop_track)
+            })
+            .await?;
             Ok(NodeResponse::Ok)
         }
-        NodeRequest::Queue { url, to } => {
-            route(runtime, to, move |client| client.queue(&url)).await?;
+        NodeRequest::Queue { url } => {
+            route(runtime, move |client| client.queue(&url)).await?;
             Ok(NodeResponse::Ok)
         }
-        NodeRequest::Control { action, to } => {
-            route(runtime, to, move |client| client.control(&action)).await?;
+        NodeRequest::Control { action } => {
+            route(runtime, move |client| client.control(&action)).await?;
             Ok(NodeResponse::Ok)
         }
-        NodeRequest::LoopStatus { to } => {
-            let status = route(runtime, to, |client| client.loop_status()).await?;
+        NodeRequest::LoopStatus => {
+            let status = route(runtime, |client| client.loop_status()).await?;
             Ok(NodeResponse::LoopStatus { status })
         }
-        NodeRequest::Status { to } => {
-            let status = route(runtime, to, |client| client.status()).await?;
+        NodeRequest::Status => {
+            let status = route(runtime, |client| client.status()).await?;
             Ok(NodeResponse::Status {
                 status: Box::new(status),
             })
         }
-        NodeRequest::History { to } => {
-            let entries = route(runtime, to, |client| client.history()).await?;
+        NodeRequest::History => {
+            let entries = route(runtime, |client| client.history()).await?;
             Ok(NodeResponse::History { entries })
         }
         NodeRequest::Devices => Ok(NodeResponse::Devices {
@@ -391,12 +396,12 @@ async fn dispatch(request: NodeRequest, runtime: &NodeRuntime) -> Result<NodeRes
     }
 }
 
-async fn route<T, F>(runtime: &NodeRuntime, to: Option<String>, operation: F) -> Result<T>
+async fn route<T, F>(runtime: &NodeRuntime, operation: F) -> Result<T>
 where
     T: Send + 'static,
     F: FnOnce(PeerClient) -> Result<T> + Send + 'static,
 {
-    let destination = resolve_destination(runtime.config_path.as_deref(), to.as_deref())?;
+    let destination = resolve_destination(runtime.config_path.as_deref())?;
     let (url, token) = match destination {
         Destination::SelfNode { .. } => (runtime.local_url.clone(), runtime.local_token.clone()),
         Destination::Peer(peer) => (peer.url, peer.token),
@@ -409,37 +414,12 @@ where
     .map_err(|error| anyhow::anyhow!("destination request task failed: {error}"))?
 }
 
-pub fn resolve_destination(config_path: Option<&Path>, to: Option<&str>) -> Result<Destination> {
+pub fn resolve_destination(config_path: Option<&Path>) -> Result<Destination> {
     let config = DeviceConfig::load(config_path)?;
     let local_name = config
         .local_name
         .clone()
         .unwrap_or_else(default_device_name);
-
-    if let Some(name) = to {
-        if is_local_name(name, &local_name) {
-            return Ok(Destination::SelfNode { name: local_name });
-        }
-        if let Some(peer) = config
-            .devices
-            .iter()
-            .find(|device| device.name == name)
-            .cloned()
-        {
-            return Ok(Destination::Peer(peer));
-        }
-        if let Some(legacy) = config
-            .legacy_peer
-            .as_ref()
-            .filter(|device| device.name == name)
-        {
-            if is_loopback_peer_url(&legacy.url) {
-                return Ok(Destination::SelfNode { name: local_name });
-            }
-            return Ok(Destination::Peer(legacy.clone()));
-        }
-        anyhow::bail!("unknown device `{name}`");
-    }
 
     if let Some(selected) = &config.selected_device {
         let peer = config
@@ -451,12 +431,6 @@ pub fn resolve_destination(config_path: Option<&Path>, to: Option<&str>) -> Resu
         return Ok(Destination::Peer(peer));
     }
 
-    if let Some(legacy) = &config.legacy_peer
-        && !is_loopback_peer_url(&legacy.url)
-    {
-        return Ok(Destination::Peer(legacy.clone()));
-    }
-
     Ok(Destination::SelfNode { name: local_name })
 }
 
@@ -466,17 +440,12 @@ pub fn device_set(config_path: Option<&Path>) -> Result<DeviceSet> {
         .local_name
         .clone()
         .unwrap_or_else(default_device_name);
-    let legacy_peer = config
-        .legacy_peer
-        .as_ref()
-        .filter(|device| !is_loopback_peer_url(&device.url));
     let selected = config
         .selected_device
         .clone()
-        .or_else(|| legacy_peer.map(|device| device.name.clone()))
         .unwrap_or_else(|| local_name.clone());
 
-    let mut devices = Vec::with_capacity(config.devices.len() + 2);
+    let mut devices = Vec::with_capacity(config.devices.len() + 1);
     devices.push(DeviceSummary {
         name: local_name,
         kind: DeviceKind::ThisDevice,
@@ -487,16 +456,6 @@ pub fn device_set(config_path: Option<&Path>) -> Result<DeviceSet> {
         kind: DeviceKind::Peer,
         address: Some(device.url.clone()),
     }));
-    if config.devices.is_empty()
-        && let Some(legacy) = legacy_peer
-    {
-        devices.push(DeviceSummary {
-            name: legacy.name.clone(),
-            kind: DeviceKind::Peer,
-            address: Some(legacy.url.clone()),
-        });
-    }
-
     Ok(DeviceSet { selected, devices })
 }
 
@@ -515,7 +474,6 @@ pub fn add_peer(
     if is_local_name(name, &local_name) {
         anyhow::bail!("device name `{name}` conflicts with this device");
     }
-    migrate_legacy_peer(&mut config);
     if config.devices.iter().any(|device| device.name == name) {
         anyhow::bail!("device `{name}` already exists");
     }
@@ -542,7 +500,6 @@ pub fn add_paired_peer(
     }
 
     let mut config = DeviceConfig::load(config_path_override)?;
-    migrate_legacy_peer(&mut config);
     if config.devices.iter().any(|device| device.name == peer_name) {
         anyhow::bail!("device `{peer_name}` already exists");
     }
@@ -587,15 +544,6 @@ pub fn select_device(config_path_override: Option<&Path>, name: &str) -> Result<
         .unwrap_or_else(default_device_name);
     let selecting_self = is_local_name(name, &local_name);
 
-    if config.devices.is_empty()
-        && config
-            .legacy_peer
-            .as_ref()
-            .is_some_and(|legacy| !is_loopback_peer_url(&legacy.url))
-    {
-        migrate_legacy_peer(&mut config);
-    }
-
     if selecting_self {
         config.selected_device = None;
         if config_path(config_path_override)?.exists() || !config.devices.is_empty() {
@@ -612,17 +560,6 @@ pub fn select_device(config_path_override: Option<&Path>, name: &str) -> Result<
     Ok(name.to_string())
 }
 
-fn migrate_legacy_peer(config: &mut DeviceConfig) {
-    if !config.devices.is_empty() {
-        return;
-    }
-    if let Some(legacy) = &config.legacy_peer
-        && !is_loopback_peer_url(&legacy.url)
-    {
-        config.devices.push(legacy.clone());
-    }
-}
-
 fn persist_device_config(config_path_override: Option<&Path>, config: &DeviceConfig) -> Result<()> {
     let path = config_path(config_path_override)?;
     let mut root = load_toml_root(&path)?;
@@ -630,18 +567,9 @@ fn persist_device_config(config_path_override: Option<&Path>, config: &DeviceCon
         .as_table_mut()
         .ok_or_else(|| anyhow::anyhow!("config root must be a TOML table"))?;
 
-    let materialized_legacy_peer = config.legacy_peer.as_ref().is_some_and(|legacy| {
-        !is_loopback_peer_url(&legacy.url)
-            && config.devices.iter().any(|device| {
-                device.name == legacy.name
-                    && device.url == legacy.url
-                    && device.token == legacy.token
-            })
-    });
-    if materialized_legacy_peer {
-        table.remove("receiver_url");
-        table.remove("peer_url");
-    }
+    table.remove("receiver_url");
+    table.remove("peer_url");
+    table.remove("token");
 
     match &config.selected_device {
         Some(name) => {
@@ -711,28 +639,6 @@ fn validate_name(name: &str) -> Result<()> {
 
 fn is_local_name(name: &str, local_name: &str) -> bool {
     name == local_name || name.eq_ignore_ascii_case("self") || name.eq_ignore_ascii_case("local")
-}
-
-fn is_loopback_peer_url(url: &str) -> bool {
-    let Some(rest) = url.strip_prefix("http://") else {
-        return false;
-    };
-    let authority = rest.split('/').next().unwrap_or(rest);
-    let host = if authority.starts_with('[') {
-        authority
-            .split_once(']')
-            .map(|(host, _)| host.trim_start_matches('['))
-            .unwrap_or(authority)
-    } else {
-        authority
-            .rsplit_once(':')
-            .map(|(host, _)| host)
-            .unwrap_or(authority)
-    };
-    host.eq_ignore_ascii_case("localhost")
-        || host
-            .parse::<IpAddr>()
-            .is_ok_and(|address| address.is_loopback())
 }
 
 fn write_toml_atomic(path: &Path, value: &toml::Value) -> Result<()> {
@@ -824,12 +730,12 @@ mod tests {
     #[test]
     fn empty_config_resolves_to_this_device() {
         let path = unique_path("self");
-        let destination = resolve_destination(Some(&path), None).expect("resolve destination");
+        let destination = resolve_destination(Some(&path)).expect("resolve destination");
         assert!(matches!(destination, Destination::SelfNode { .. }));
     }
 
     #[test]
-    fn legacy_loopback_config_is_this_device_not_a_duplicate_peer() {
+    fn legacy_flat_config_does_not_create_a_peer() {
         let path = unique_path("legacy-loopback");
         fs::write(
             &path,
@@ -841,7 +747,7 @@ token = "receiver-token"
         .expect("write config");
 
         assert!(matches!(
-            resolve_destination(Some(&path), None).expect("resolve destination"),
+            resolve_destination(Some(&path)).expect("resolve destination"),
             Destination::SelfNode { .. }
         ));
         let devices = device_set(Some(&path)).expect("list devices");
@@ -866,7 +772,7 @@ token = "secret"
         )
         .expect("write config");
 
-        let destination = resolve_destination(Some(&path), None).expect("resolve destination");
+        let destination = resolve_destination(Some(&path)).expect("resolve destination");
         match destination {
             Destination::Peer(peer) => assert_eq!(peer.name, "living"),
             Destination::SelfNode { .. } => panic!("expected peer"),
@@ -875,7 +781,7 @@ token = "secret"
     }
 
     #[test]
-    fn selecting_this_device_preserves_receiver_settings() {
+    fn selecting_this_device_preserves_node_settings() {
         let path = unique_path("preserve");
         fs::write(
             &path,
@@ -901,10 +807,7 @@ token = "peer-token"
         let value: toml::Value =
             toml::from_str(&fs::read_to_string(&path).expect("read config")).expect("parse config");
         let table = value.as_table().expect("config table");
-        assert_eq!(
-            table.get("token").and_then(toml::Value::as_str),
-            Some("receiver-token")
-        );
+        assert!(!table.contains_key("token"));
         assert_eq!(
             table.get("bind").and_then(toml::Value::as_str),
             Some("0.0.0.0:8765")
@@ -914,7 +817,7 @@ token = "peer-token"
     }
 
     #[test]
-    fn adding_peer_preserves_node_settings_and_migrates_legacy_peer() {
+    fn adding_peer_preserves_node_settings_and_removes_legacy_fields() {
         let path = unique_path("add-peer");
         fs::write(
             &path,
@@ -929,51 +832,16 @@ receiver_url = "http://192.168.1.10:8765"
         add_peer(Some(&path), "bedroom", "192.168.1.20", "bedroom-token").expect("add peer");
 
         let config = DeviceConfig::load(Some(&path)).expect("reload config");
-        assert_eq!(config.devices.len(), 2);
-        assert_eq!(config.devices[0].name, "legacy");
-        assert_eq!(config.devices[1].name, "bedroom");
+        assert_eq!(config.devices.len(), 1);
+        assert_eq!(config.devices[0].name, "bedroom");
         let value: toml::Value =
             toml::from_str(&fs::read_to_string(&path).expect("read config")).expect("parse config");
         let table = value.as_table().expect("config table");
-        assert_eq!(
-            table.get("token").and_then(toml::Value::as_str),
-            Some("receiver-token")
-        );
+        assert!(!table.contains_key("token"));
+        assert!(!table.contains_key("receiver_url"));
         assert_eq!(
             table.get("bind").and_then(toml::Value::as_str),
             Some("0.0.0.0:8765")
-        );
-        let _ = fs::remove_file(path);
-    }
-
-    #[test]
-    fn migrated_legacy_peer_does_not_reappear_after_removal() {
-        let path = unique_path("legacy-remove");
-        fs::write(
-            &path,
-            r#"
-receiver_url = "http://192.168.1.10:8765"
-token = "legacy-token"
-"#,
-        )
-        .expect("write config");
-
-        let selected = select_device(Some(&path), "legacy").expect("select legacy peer");
-        assert_eq!(selected, "legacy");
-        remove_peer(Some(&path), "legacy").expect("remove migrated legacy peer");
-
-        let devices = device_set(Some(&path)).expect("list devices");
-        assert_eq!(devices.devices.len(), 1);
-        assert_eq!(devices.devices[0].kind, DeviceKind::ThisDevice);
-
-        let value: toml::Value =
-            toml::from_str(&fs::read_to_string(&path).expect("read config")).expect("parse config");
-        assert!(
-            value
-                .as_table()
-                .expect("config table")
-                .get("receiver_url")
-                .is_none()
         );
         let _ = fs::remove_file(path);
     }

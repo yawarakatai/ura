@@ -162,14 +162,14 @@ impl IntoResponse for LocalApiError {
 async fn play(
     Json(request): Json<PlayRequest>,
 ) -> std::result::Result<Json<OkResponse>, LocalApiError> {
-    run_node_command(move |client| client.play(&request.url, None)).await?;
+    run_node_command(move |client| client.play(&request.url)).await?;
     Ok(Json(OkResponse { ok: true }))
 }
 
 async fn enqueue(
     Json(request): Json<PlayRequest>,
 ) -> std::result::Result<Json<OkResponse>, LocalApiError> {
-    run_node_command(move |client| client.queue(&request.url, None)).await?;
+    run_node_command(move |client| client.queue(&request.url)).await?;
     Ok(Json(OkResponse { ok: true }))
 }
 
@@ -178,9 +178,9 @@ async fn control(
 ) -> std::result::Result<Json<ControlResponse>, LocalApiError> {
     let command = request.command;
     let loop_status = if command == "loop-status" {
-        Some(run_node_command(|client| client.loop_status(None)).await?)
+        Some(run_node_command(|client| client.loop_status()).await?)
     } else {
-        run_node_command(move |client| client.control(&command, None)).await?;
+        run_node_command(move |client| client.control(&command)).await?;
         None
     };
     Ok(Json(ControlResponse {
@@ -190,11 +190,11 @@ async fn control(
 }
 
 async fn status() -> std::result::Result<Json<MpvStatus>, LocalApiError> {
-    Ok(Json(run_node_command(|client| client.status(None)).await?))
+    Ok(Json(run_node_command(|client| client.status()).await?))
 }
 
 async fn history() -> std::result::Result<Json<Vec<HistoryEntry>>, LocalApiError> {
-    Ok(Json(run_node_command(|client| client.history(None)).await?))
+    Ok(Json(run_node_command(|client| client.history()).await?))
 }
 
 async fn devices() -> std::result::Result<Json<DeviceSet>, LocalApiError> {

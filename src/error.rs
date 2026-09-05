@@ -2,7 +2,6 @@ use std::{error::Error, fmt};
 
 #[derive(Debug)]
 pub enum UraError {
-    MissingConfigField(&'static str),
     MissingHome,
     MissingRuntimeDir,
     UnsupportedControlCommand(String),
@@ -13,9 +12,6 @@ pub enum UraError {
 impl fmt::Display for UraError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::MissingConfigField(field) => {
-                write!(f, "missing required config field `{field}`")
-            }
             Self::MissingHome => write!(f, "HOME is not set; cannot locate config file"),
             Self::MissingRuntimeDir => {
                 write!(

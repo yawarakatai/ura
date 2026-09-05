@@ -38,11 +38,9 @@ use crate::mpv::{
 };
 use crate::pairing::{ClaimDecision, PairingCompletion, PairingManager, PairingStatus};
 
-pub async fn run_peer_api(bind: SocketAddr, token: Option<String>) -> AnyhowResult<()> {
+pub async fn run_peer_api(bind: SocketAddr, node_token: String) -> AnyhowResult<()> {
     info!("peer API startup");
-    if let Some(token) = &token {
-        validate_peer_token(token)?;
-    }
+    validate_peer_token(&node_token)?;
     ensure_program_in_path("mpv")?;
     ensure_program_in_path("yt-dlp")?;
 
@@ -76,7 +74,7 @@ pub async fn run_peer_api(bind: SocketAddr, token: Option<String>) -> AnyhowResu
     let mut api_shutdown = Some(api_shutdown);
     let mut api_task = tokio::spawn(run_api(
         bind,
-        token,
+        node_token,
         socket_path,
         database,
         playback_state,
@@ -143,7 +141,7 @@ pub async fn run_peer_api(bind: SocketAddr, token: Option<String>) -> AnyhowResu
 
 async fn run_api(
     bind: SocketAddr,
-    token: Option<String>,
+    node_token: String,
     socket_path: PathBuf,
     database: Arc<Database>,
     playback_state: SharedPlaybackState,
@@ -151,7 +149,7 @@ async fn run_api(
     shutdown: oneshot::Receiver<()>,
 ) -> AnyhowResult<()> {
     let state = AppState {
-        legacy_token: token.map(Arc::from),
+        node_token: Arc::from(node_token),
         socket_path: Arc::new(socket_path),
         database,
         playback_state,
@@ -327,7 +325,7 @@ fn app(state: AppState) -> Router {
 
 #[derive(Clone)]
 struct AppState {
-    legacy_token: Option<Arc<str>>,
+    node_token: Arc<str>,
     socket_path: Arc<PathBuf>,
     database: Arc<Database>,
     playback_state: SharedPlaybackState,
@@ -338,6 +336,8 @@ struct AppState {
 struct PlayRequest {
     url: String,
     source: Option<String>,
+    #[serde(default, rename = "loop")]
+    loop_track: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -418,6 +418,11 @@ async fn play(
     let play_url = validate_supported_url(&request.url)?;
     let source_url = request.url;
     let source = request.source;
+    let loop_mode = if request.loop_track {
+        LoopMode::One
+    } else {
+        LoopMode::Off
+    };
     register_playback_request(
         &state.playback_state,
         source_url.clone(),
@@ -428,7 +433,10 @@ async fn play(
 
     let result = run_mpv_command(state.clone(), {
         let play_url = play_url.clone();
-        move |client| client.load_replace(&play_url)
+        move |client| {
+            client.set_loop_mode(loop_mode)?;
+            client.load_replace(&play_url)
+        }
     })
     .await;
     if result.is_err() {
@@ -702,11 +710,7 @@ fn authorize(headers: &HeaderMap, state: &AppState) -> std::result::Result<(), A
         return Ok(());
     }
 
-    if state
-        .legacy_token
-        .as_ref()
-        .is_some_and(|token| constant_time_eq(actual.as_bytes(), token.as_bytes()))
-    {
+    if constant_time_eq(actual.as_bytes(), state.node_token.as_bytes()) {
         Ok(())
     } else {
         warn!(reason = "invalid bearer token", "auth failure");
@@ -1263,7 +1267,7 @@ mod tests {
     fn test_state() -> (AppState, PathBuf) {
         let db_path = unique_path("receiver-history.db");
         let state = AppState {
-            legacy_token: Some(Arc::from("0123456789abcdef0123456789abcdef")),
+            node_token: Arc::from("0123456789abcdef0123456789abcdef"),
             socket_path: Arc::new(PathBuf::from("/tmp/ura.sock")),
             database: Arc::new(Database::open(db_path.clone()).expect("open test database")),
             playback_state: shared_playback_state(),

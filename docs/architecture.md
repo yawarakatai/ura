@@ -1,6 +1,6 @@
 # Architecture
 
-Status: Current `0.3.1` behavior.
+Status: Current `0.4.0` behavior.
 
 `ura` is a small Linux audio node. Each machine can play audio itself and can
 route local commands to a paired peer. Nodes do not have fixed sending or
@@ -72,49 +72,53 @@ address, and bearer token. Internally the selected destination resolves to
 `Destination::SelfNode` or `Destination::Peer`.
 
 When no remote device is selected, this device is the default destination.
-The legacy flat `receiver_url` key is still accepted for `0.2.x` configuration
-compatibility. A loopback value is treated as this device rather than being
-shown as a duplicate peer.
+Legacy flat `receiver_url` and top-level `token` fields are ignored; peers must
+be represented by `[[devices]]` entries created through pairing or device
+management.
 
 ## CLI
 
-The same binary provides node, playback, pairing, and device commands:
+The same binary uses a URL-first CLI with a small command set:
 
 ```bash
-ura daemon
-ura play "https://youtu.be/..."
-ura queue "https://youtu.be/..."
-ura pause
-ura resume
+ura                                # status
+ura "https://youtu.be/..."         # play now
+ura --queue "https://youtu.be/..."
+ura --loop "https://youtu.be/..."
 ura toggle
 ura stop
-ura status
 ura history
-ura loop
-ura loop off
-ura loop track
-ura loop queue
-ura loop status
-ura pair
-ura pair 192.168.1.23
+ura history list
+ura history replay
+ura history replay 3
 ura device list
 ura device select
-ura config init
-ura token generate
+ura pair
+ura pair 192.168.1.23
+ura daemon
 ```
 
-Normal local commands first use the local node socket. The local node resolves
-`--to <name>` when supplied, otherwise it resolves the persisted selected
-device. `--to` is a one-shot override and does not change the stored selection.
+A bare URL plays immediately. `--queue` appends it instead, while `--loop`
+starts it with current-track looping enabled. Queue and loop options cannot be
+combined. A normal play request disables an earlier track loop, so looping does
+not leak into later playback.
+
+Running `ura` without a URL or command shows status. Pause and resume are exposed
+as one `ura toggle` operation. `ura --help` is the only help entry point; an
+additional `help` subcommand is not generated.
+
+`ura history` and `ura history list` show individual play events newest first
+with one-based entry numbers. `ura history replay <NUMBER>` submits the selected
+entry's original allowlisted URL as a normal, non-looping play command; omitting
+the number uses entry 1.
+
+Playback, status, and history require the running local node and always use its
+persisted selected device. The CLI has no one-shot destination override and no
+direct-peer mode.
 
 `ura device select` without a name opens an interactive selector with arrow-key
 navigation and text filtering. `ura device select <name>` remains suitable for
 scripts.
-
-For compatibility, a client-only invocation with no running local node can
-still talk directly to an explicitly configured remote peer. Selecting this
-device without a running local node fails with an actionable error because local
-playback requires the long-running node and mpv backend.
 
 ## Local Node Socket
 
@@ -134,7 +138,7 @@ does not enter this routing boundary.
 
 ## Browser Control API
 
-Firefox does not store or contact remote peers directly in `0.3.1`. It talks
+Firefox does not store or contact remote peers directly in `0.4.0`. It talks
 only to:
 
 ```text
@@ -170,7 +174,7 @@ POST /v1/pair/claim
 
 They proxy the already-running node's pairing session; they do not create a new
 pairing mechanism or expose a way to start pairing over HTTP. Because this
-loopback API is new in `0.3.1`, its pairing responses use `node_name` directly.
+loopback API is new in `0.4.0`, its pairing responses use `node_name` directly.
 
 The Firefox manifest host permission is restricted to localhost.
 
@@ -268,7 +272,8 @@ fallback: ~/.local/share/ura/ura.db
 
 Playback history uses `tracks` and `plays` tables. History is returned as
 individual play events in reverse chronological order, including repeated plays
-of the same URL. Authorized local/peer clients
+of the same URL. CLI history numbers are derived from that order and are not
+stored identifiers. Authorized local/peer clients
 are stored in the existing `authorized_devices` table using SHA-256 token hashes,
 creation time, coarse `last_seen_at`, and optional revocation time. The table
 name is retained as an on-disk schema compatibility detail; the Rust API calls

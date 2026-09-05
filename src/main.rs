@@ -10,17 +10,17 @@ use clap::Parser;
 use serde::{Deserialize, Serialize};
 use unicode_width::UnicodeWidthStr;
 use ura::{
-    cli::{Cli, Command, ConfigCommand, DeviceCommand, LoopCommand, TokenCommand},
-    client::{PeerClient, PeerPairingClient},
+    cli::{Cli, Command, DeviceCommand, HistoryCommand},
+    client::PeerPairingClient,
     config::{
-        Config, ConfigInit, DeviceConfig, NodeConfig, default_control_socket_path, default_db_path,
-        default_device_name, generate_token, normalize_peer_address,
+        DeviceConfig, NodeConfig, default_control_socket_path, default_db_path,
+        default_device_name, normalize_peer_address,
     },
     db::{Database, HistoryEntry, authorize_client},
     mpv::{LoopStatus, MpvStatus},
     node::{
-        Destination, DeviceKind, DeviceSet, NodeClient, add_paired_peer, add_peer, device_set,
-        remove_peer, resolve_destination, run_node, select_device,
+        DeviceKind, DeviceSet, NodeClient, add_paired_peer, add_peer, device_set, remove_peer,
+        run_node, select_device,
     },
     pairing::{PairingCompletion, PairingStatus, valid_pairing_code},
     selector,
@@ -28,286 +28,155 @@ use ura::{
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let cli = Cli::parse();
+    let Cli {
+        url,
+        queue,
+        loop_track,
+        command,
+    } = Cli::parse();
 
-    match cli.command {
-        Command::Daemon { bind } => {
-            init_daemon_logging();
-            let config_path = cli.config.clone();
-            let config = NodeConfig::load_with_overrides(cli.config, bind, cli.token)?;
-            run_node(config.bind, config.token, config_path).await
-        }
-        Command::Play { to, url } => {
-            let client = playback_client_for(cli.config, cli.peer_url, cli.token, to)?;
-            client.play(&url)?;
-            println!("play: sent {url}");
-            Ok(())
-        }
-        Command::Queue { to, url } => {
-            let client = playback_client_for(cli.config, cli.peer_url, cli.token, to)?;
-            client.queue(&url)?;
-            println!("queue: sent {url}");
-            Ok(())
-        }
-        Command::Pause { to } => {
-            playback_client_for(cli.config, cli.peer_url, cli.token, to)?.control("pause")?;
-            println!("pause: sent");
-            Ok(())
-        }
-        Command::Resume { to } => {
-            playback_client_for(cli.config, cli.peer_url, cli.token, to)?.control("resume")?;
-            println!("resume: sent");
-            Ok(())
-        }
-        Command::Toggle { to } => {
-            playback_client_for(cli.config, cli.peer_url, cli.token, to)?.control("toggle")?;
+    match command {
+        None => run_default(url, queue, loop_track),
+        Some(Command::Toggle) => {
+            NodeClient::new()?.control("toggle")?;
             println!("toggle: sent");
             Ok(())
         }
-        Command::Stop { to } => {
-            playback_client_for(cli.config, cli.peer_url, cli.token, to)?.control("stop")?;
+        Some(Command::Stop) => {
+            NodeClient::new()?.control("stop")?;
             println!("stop: sent");
             Ok(())
         }
-        Command::Loop { to, command } => {
-            let to = command_to_device(&to, &command);
-            let client = playback_client_for(cli.config, cli.peer_url, cli.token, to)?;
-            match command {
-                None => {
-                    if client.loop_status()? == LoopStatus::One {
-                        client.control("loop-off")?;
-                        println!("loop off: sent");
-                    } else {
-                        client.control("loop-one")?;
-                        println!("loop track: sent");
-                    }
-                }
-                Some(LoopCommand::Off { .. }) => {
-                    client.control("loop-off")?;
-                    println!("loop off: sent");
-                }
-                Some(LoopCommand::Track { .. }) => {
-                    client.control("loop-one")?;
-                    println!("loop track: sent");
-                }
-                Some(LoopCommand::Queue { .. }) => {
-                    client.control("loop-queue")?;
-                    println!("loop queue: sent");
-                }
-                Some(LoopCommand::Status { .. }) => {
-                    println!("loop status: {:?}", client.loop_status()?);
-                }
-            }
-            Ok(())
-        }
-        Command::Pair {
+        Some(Command::History { command }) => run_history_command(command),
+        Some(Command::Device { command }) => run_device_command(command),
+        Some(Command::Pair {
             address,
             code,
             node_name,
             name,
             select,
             no_select,
-        } => match address {
-            Some(address) => pair_peer(
-                cli.config.as_deref(),
-                &address,
-                code,
-                node_name,
-                name,
-                select,
-                no_select,
-            ),
+        }) => match address {
+            Some(address) => pair_peer(&address, code, node_name, name, select, no_select),
             None => open_pairing().await,
         },
-        Command::Device { command } => match command {
-            DeviceCommand::List => {
-                let devices = current_devices(cli.config.as_deref())?;
-                let database = Database::open(default_db_path()?)?;
-                print_devices(&devices, &database.authorized_clients()?);
-                Ok(())
-            }
-            DeviceCommand::Add {
-                name,
-                address,
-                token,
-            } => {
-                add_peer(cli.config.as_deref(), &name, &address, &token)?;
-                println!("device added: {name}");
-                Ok(())
-            }
-            DeviceCommand::Select { name } => {
-                let devices = current_devices(cli.config.as_deref())?;
-                let name = match name {
-                    Some(name) => name,
-                    None => selector::select_device(&devices)?,
-                };
-                let selected = set_selected_device(cli.config.as_deref(), &name)?;
-                println!("selected device: {selected}");
-                Ok(())
-            }
-            DeviceCommand::Remove { name } => {
-                remove_peer(cli.config.as_deref(), &name)?;
-                println!("device removed: {name}");
-                Ok(())
-            }
-            DeviceCommand::Authorize { name } => {
-                let database = Database::open(default_db_path()?)?;
-                let token = authorize_client(&database, &name)?;
-                println!("Authorized client \"{name}\".");
-                println!();
-                println!("Token:");
-                println!("  {token}");
-                println!();
-                println!("This token is shown only once.");
-                Ok(())
-            }
-            DeviceCommand::Revoke { name } => {
-                let database = Database::open(default_db_path()?)?;
-                if database.revoke_authorized_client(&name)? {
-                    println!("revoked client: {name}");
-                    Ok(())
-                } else {
-                    anyhow::bail!("unknown active authorized client `{name}`")
-                }
-            }
-        },
-        Command::Config { command } => match command {
-            ConfigCommand::Init {
-                force,
-                peer_url,
-                bind,
-            } => {
-                let path = Config::init(ConfigInit {
-                    config_path: cli.config,
-                    peer_url,
-                    bind,
-                    token: cli.token,
-                    force,
-                })?;
-                println!("config: created {}", path.display());
-                println!("config: token written but not printed");
-                Ok(())
-            }
-        },
-        Command::Token { command } => match command {
-            TokenCommand::Generate => {
-                println!("{}", generate_token()?);
-                Ok(())
-            }
-        },
-        Command::Status { to } => {
-            let status = playback_client_for(cli.config, cli.peer_url, cli.token, to)?.status()?;
-            print_status(&status);
-            Ok(())
-        }
-        Command::History { to } => {
-            let history =
-                playback_client_for(cli.config, cli.peer_url, cli.token, to)?.history()?;
-            print_history(&history);
-            Ok(())
+        Some(Command::Daemon { bind }) => {
+            init_daemon_logging();
+            let config = NodeConfig::load(bind)?;
+            run_node(config.bind, None).await
         }
     }
 }
 
-enum PlaybackClient {
-    Node {
-        client: NodeClient,
-        to: Option<String>,
-    },
-    Http(PeerClient),
+fn run_default(url: Option<String>, queue: bool, loop_track: bool) -> Result<()> {
+    let client = NodeClient::new()?;
+    match url {
+        Some(url) if queue => {
+            client.queue(&url)?;
+            println!("queue: sent {url}");
+        }
+        Some(url) => {
+            client.play_with_loop(&url, loop_track)?;
+            println!("play: sent {url}");
+        }
+        None => print_status(&client.status()?),
+    }
+    Ok(())
 }
 
-impl PlaybackClient {
-    fn play(&self, url: &str) -> Result<()> {
-        match self {
-            Self::Node { client, to } => client.play(url, to.as_deref()),
-            Self::Http(client) => client.play(url),
+fn run_history_command(command: Option<HistoryCommand>) -> Result<()> {
+    let client = NodeClient::new()?;
+    let history = client.history()?;
+    match command {
+        None | Some(HistoryCommand::List) => print_history(&history),
+        Some(HistoryCommand::Replay { index }) => {
+            let entry = history_entry(&history, index.get())?;
+            let title = entry.title.as_deref().unwrap_or("Unknown title");
+            client.play(&entry.source_url)?;
+            println!("history replay #{}: sent {title}", index.get());
         }
     }
-
-    fn queue(&self, url: &str) -> Result<()> {
-        match self {
-            Self::Node { client, to } => client.queue(url, to.as_deref()),
-            Self::Http(client) => client.queue(url),
-        }
-    }
-
-    fn control(&self, action: &str) -> Result<()> {
-        match self {
-            Self::Node { client, to } => client.control(action, to.as_deref()),
-            Self::Http(client) => client.control(action),
-        }
-    }
-
-    fn loop_status(&self) -> Result<LoopStatus> {
-        match self {
-            Self::Node { client, to } => client.loop_status(to.as_deref()),
-            Self::Http(client) => client.loop_status(),
-        }
-    }
-
-    fn status(&self) -> Result<MpvStatus> {
-        match self {
-            Self::Node { client, to } => client.status(to.as_deref()),
-            Self::Http(client) => client.status(),
-        }
-    }
-
-    fn history(&self) -> Result<Vec<HistoryEntry>> {
-        match self {
-            Self::Node { client, to } => client.history(to.as_deref()),
-            Self::Http(client) => client.history(),
-        }
-    }
+    Ok(())
 }
 
-fn playback_client_for(
-    config_path: Option<std::path::PathBuf>,
-    peer_url: Option<String>,
-    token: Option<String>,
-    to: Option<String>,
-) -> Result<PlaybackClient> {
-    let has_legacy_override = peer_url.is_some()
-        || token.is_some()
-        || std::env::var_os("URA_PEER_URL").is_some()
-        || std::env::var_os("URA_RECEIVER_URL").is_some()
-        || std::env::var_os("URA_TOKEN").is_some();
-    if has_legacy_override {
-        let config = Config::load_with_overrides(config_path, peer_url, token)?;
-        return Ok(PlaybackClient::Http(PeerClient::new(
-            config.peer_url,
-            config.token,
-        )?));
+fn history_entry(history: &[HistoryEntry], index: usize) -> Result<&HistoryEntry> {
+    if history.is_empty() {
+        anyhow::bail!("playback history is empty");
     }
-
-    if config_path.is_none() && NodeClient::is_available() {
-        return Ok(PlaybackClient::Node {
-            client: NodeClient::new()?,
-            to,
-        });
+    if index == 0 {
+        anyhow::bail!("history entry numbers start at 1");
     }
-
-    match resolve_destination(config_path.as_deref(), to.as_deref())? {
-        Destination::Peer(peer) => Ok(PlaybackClient::Http(PeerClient::new(peer.url, peer.token)?)),
-        Destination::SelfNode { name } => anyhow::bail!(
-            "this device (`{name}`) is selected, but the local ura node is not running\n\nStart it with:\n  ura daemon"
-        ),
-    }
+    history.get(index - 1).ok_or_else(|| {
+        anyhow::anyhow!(
+            "history entry {index} does not exist; choose an entry from 1 to {}",
+            history.len()
+        )
+    })
 }
 
-fn current_devices(config_path: Option<&std::path::Path>) -> Result<DeviceSet> {
-    if config_path.is_none() && NodeClient::is_available() {
+fn run_device_command(command: DeviceCommand) -> Result<()> {
+    match command {
+        DeviceCommand::List => {
+            let devices = current_devices()?;
+            let database = Database::open(default_db_path()?)?;
+            print_devices(&devices, &database.authorized_clients()?);
+        }
+        DeviceCommand::Add {
+            name,
+            address,
+            token,
+        } => {
+            add_peer(None, &name, &address, &token)?;
+            println!("device added: {name}");
+        }
+        DeviceCommand::Select { name } => {
+            let devices = current_devices()?;
+            let name = match name {
+                Some(name) => name,
+                None => selector::select_device(&devices)?,
+            };
+            let selected = set_selected_device(&name)?;
+            println!("selected device: {selected}");
+        }
+        DeviceCommand::Remove { name } => {
+            remove_peer(None, &name)?;
+            println!("device removed: {name}");
+        }
+        DeviceCommand::Authorize { name } => {
+            let database = Database::open(default_db_path()?)?;
+            let token = authorize_client(&database, &name)?;
+            println!("Authorized client \"{name}\".");
+            println!();
+            println!("Token:");
+            println!("  {token}");
+            println!();
+            println!("This token is shown only once.");
+        }
+        DeviceCommand::Revoke { name } => {
+            let database = Database::open(default_db_path()?)?;
+            if database.revoke_authorized_client(&name)? {
+                println!("revoked client: {name}");
+            } else {
+                anyhow::bail!("unknown active authorized client `{name}`");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn current_devices() -> Result<DeviceSet> {
+    if NodeClient::is_available() {
         NodeClient::new()?.devices()
     } else {
-        device_set(config_path)
+        device_set(None)
     }
 }
 
-fn set_selected_device(config_path: Option<&std::path::Path>, name: &str) -> Result<String> {
-    if config_path.is_none() && NodeClient::is_available() {
+fn set_selected_device(name: &str) -> Result<String> {
+    if NodeClient::is_available() {
         NodeClient::new()?.select(name)
     } else {
-        select_device(config_path, name)
+        select_device(None, name)
     }
 }
 
@@ -386,7 +255,6 @@ async fn open_pairing() -> Result<()> {
 }
 
 fn pair_peer(
-    config_path: Option<&std::path::Path>,
     address: &str,
     code: Option<String>,
     node_name: Option<String>,
@@ -397,7 +265,7 @@ fn pair_peer(
     let normalized_address = normalize_peer_address(address)?;
     let pairing_client = PeerPairingClient::new(normalized_address.clone())?;
     let info = pairing_client.info()?;
-    let existing_config = DeviceConfig::load(config_path)?;
+    let existing_config = DeviceConfig::load(None)?;
     let tty = io::stdin().is_terminal();
     let default_local_name = existing_config
         .local_name
@@ -456,7 +324,7 @@ fn pair_peer(
     }
 
     match add_paired_peer(
-        config_path,
+        None,
         &peer_alias,
         &normalized_address,
         &claim.token,
@@ -561,16 +429,6 @@ enum PairControlResponse {
     },
 }
 
-fn command_to_device(parent_to: &Option<String>, command: &Option<LoopCommand>) -> Option<String> {
-    match command {
-        Some(LoopCommand::Off { to })
-        | Some(LoopCommand::Track { to })
-        | Some(LoopCommand::Queue { to })
-        | Some(LoopCommand::Status { to }) => to.clone().or_else(|| parent_to.clone()),
-        None => parent_to.clone(),
-    }
-}
-
 fn print_status(status: &MpvStatus) {
     if (status.idle_active.unwrap_or(false)
         || (status.pause.is_none()
@@ -617,25 +475,32 @@ fn print_status(status: &MpvStatus) {
 }
 
 fn print_history(history: &[HistoryEntry]) {
-    println!(
-        "{:<20}  {}  SOURCE",
+    print!("{}", render_history(history));
+}
+
+fn render_history(history: &[HistoryEntry]) -> String {
+    let mut output = format!(
+        "{:>4}  {:<20}  {}  SOURCE\n",
+        "#",
         "TIMESTAMP",
         format_column("TITLE", 28)
     );
-    for entry in history {
+    for (index, entry) in history.iter().enumerate() {
         let timestamp = entry
             .display_played_at
             .as_deref()
             .or(entry.last_played_at.as_deref())
             .unwrap_or(entry.created_at.as_str());
         let title = entry.title.as_deref().unwrap_or("Unknown title");
-        println!(
-            "{:<20}  {}  {}",
+        output.push_str(&format!(
+            "{:>4}  {:<20}  {}  {}\n",
+            index + 1,
             timestamp,
             format_column(title, 28),
             entry.source_kind
-        );
+        ));
     }
+    output
 }
 
 fn print_devices(devices: &DeviceSet, authorized: &[ura::db::AuthorizedClient]) {
@@ -781,6 +646,50 @@ fn init_daemon_logging() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn history_fixture(title: &str, source_url: &str) -> HistoryEntry {
+        HistoryEntry {
+            source_kind: "url".to_string(),
+            source_url: source_url.to_string(),
+            play_url: source_url.to_string(),
+            title: Some(title.to_string()),
+            uploader: None,
+            duration: None,
+            thumbnail_url: None,
+            created_at: "1".to_string(),
+            last_played_at: Some("1".to_string()),
+            display_played_at: Some("1970-01-01 00:00:01".to_string()),
+            play_count: 1,
+        }
+    }
+
+    #[test]
+    fn history_entries_use_latest_first_one_based_numbers() {
+        let history = vec![
+            history_fixture("Latest", "https://youtu.be/latest"),
+            history_fixture("Earlier", "https://youtu.be/earlier"),
+        ];
+
+        assert_eq!(
+            history_entry(&history, 2)
+                .expect("second history entry")
+                .source_url,
+            "https://youtu.be/earlier"
+        );
+        assert!(history_entry(&history, 0).is_err());
+        assert!(history_entry(&history, 3).is_err());
+
+        let rendered = render_history(&history);
+        assert!(rendered.contains("   1  1970-01-01 00:00:01   Latest"));
+        assert!(rendered.contains("   2  1970-01-01 00:00:01   Earlier"));
+    }
+
+    #[test]
+    fn empty_history_cannot_be_replayed() {
+        let error = history_entry(&[], 1).expect_err("empty history should fail");
+
+        assert!(error.to_string().contains("history is empty"));
+    }
 
     #[test]
     fn formats_duration_without_null_or_zero_for_missing_values() {

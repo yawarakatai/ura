@@ -35,8 +35,8 @@ Sometimes you just want the machine in front of you to play the music.
 With `ura`, all of those are the same operation: select a playback device.
 
 - Play YouTube and YouTube Music URLs on this device or a paired Linux peer
-- Play immediately or add tracks to the queue
-- Pause, resume, stop, loop, inspect status, and view history through the same selected device
+- Play immediately, loop one track, or add tracks to the queue
+- Toggle pause/resume, stop, inspect status, and replay earlier tracks through the same selected device
 - Pair peers with a temporary six-digit code
 - Switch devices with an interactive terminal selector
 - Share the same selected device between the CLI and Firefox extension
@@ -60,7 +60,7 @@ Devices:
      NAME               TYPE         ADDRESS
   *  desktop            this device  -
 
-$ ura play "https://youtu.be/..."
+$ ura "https://youtu.be/..."
 ```
 
 The URL plays through this machine's `mpv` instance.
@@ -96,15 +96,45 @@ Filter:
 ↑/↓ move  type to filter  enter select  esc cancel
 ```
 
-The selection persists, so normal playback commands do not need a destination argument:
+The selection persists, so playback commands do not need a destination argument:
 
 ```console
-$ ura play "https://youtu.be/..."
-$ ura pause
-$ ura status
+$ ura "https://youtu.be/..."
+$ ura toggle
+$ ura
 ```
 
-`--to <NAME>` remains available as a one-shot override when you do not want to change the selected device.
+A bare URL plays immediately. URL options modify that request, while commands
+are reserved for independent actions and management:
+
+```console
+$ ura --queue "https://youtu.be/..."
+$ ura --loop "https://youtu.be/..."
+$ ura stop
+```
+
+Running `ura` without a URL or command shows the selected device's status.
+
+## Replay from history
+
+History is numbered newest first:
+
+```console
+$ ura history
+   #  TIMESTAMP             TITLE                         SOURCE
+   1  2026-07-10 17:35:00   Example song                  url
+   2  2026-07-09 09:12:00   Another song                  url
+```
+
+Replay an entry by number. Omitting the number replays the latest entry:
+
+```console
+$ ura history replay 2
+$ ura history replay
+```
+
+History and replay follow the same selected-device routing as other playback
+commands.
 
 ## Firefox extension
 
@@ -140,6 +170,8 @@ Peer HTTP requests never resolve the receiving node's selected device. They alwa
 
 Firefox follows the same rule: it submits commands to the local node rather than contacting the selected peer itself.
 
-## Current compatibility
+## Command model
 
-The existing peer pairing protocol, bearer-token authentication, HTTP peer API, history database, and legacy direct `receiver_url` / `--receiver-url` aliases are still supported while the node model is introduced. Existing remote-only client configurations continue to work when no local `ura` node is running.
+Playback, status, and history always go through the running local node. Device
+selection is persistent and shared with Firefox; there is no one-shot
+per-command destination override or direct-peer CLI mode.

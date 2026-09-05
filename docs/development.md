@@ -1,6 +1,6 @@
 # Development
 
-Status: Current `0.3.1` behavior.
+Status: Current `0.4.0` behavior.
 
 Use the project Nix flake for development and validation commands that need the
 expected toolchain or runtime tools.
@@ -51,8 +51,8 @@ cargo run -- daemon
 # terminal B
 nix develop
 cargo run -- device list
-cargo run -- play "https://youtu.be/..."
-cargo run -- status
+cargo run -- "https://youtu.be/..."
+cargo run --
 cargo run -- toggle
 cargo run -- stop
 ```
@@ -72,26 +72,25 @@ Use two machines or isolated environments. Verify the routing invariant:
    `ura daemon --bind 0.0.0.0:8765`.
 3. Pair A with B.
 4. On A, select `This device` and confirm playback is local to A.
-5. On A, select B and confirm the same `ura play` command plays on B.
+5. On A, select B and confirm the same `ura <URL>` command plays on B.
 6. On B, select some other destination if available, then send a peer request
    from A to B and confirm it still terminates on B rather than being forwarded.
 7. Switch A back to `This device` through `ura device select` and confirm the
    selection persists.
 
-`--to <name>` should override one command only and must not mutate the selected
-device.
+Playback commands must use the persisted selected device; there is no one-shot
+destination override.
 
-## Config Compatibility Verification
+## Config Verification
 
-Use an isolated configuration path when testing migrations. Cover:
+Use an isolated configuration path in tests. Cover:
 
 1. Empty config → this device is the implicit destination.
-2. Legacy `receiver_url = "http://127.0.0.1:8765"` → this device, not a duplicate peer.
-3. Legacy remote `receiver_url` → usable compatibility peer.
-4. Adding/selecting/removing peers preserves unrelated top-level settings such
-   as `bind` and legacy peer API token fields.
-5. Selecting this device does not serialize a fake self peer.
-6. No token or token hash appears in normal `device list` output.
+2. Legacy flat peer fields do not create a remote device.
+3. Adding/selecting/removing peers preserves unrelated node settings such as
+   `bind` and removes obsolete credential fields when rewriting the config.
+4. Selecting this device does not serialize a fake self peer.
+5. No token or token hash appears in normal `device list` output.
 
 ## Pairing Verification
 
@@ -129,7 +128,7 @@ cover:
     is unreachable.
 
 The Firefox host permission should remain restricted to localhost. The browser
-control API is fixed to `127.0.0.1:8766` in `0.3.1` and should never bind to the
+control API is fixed to `127.0.0.1:8766` in `0.4.0` and should never bind to the
 peer API's LAN address.
 
 ## Fake mpv Lifecycle Tests
@@ -149,8 +148,9 @@ a controlled mpv wrapper. Verify `file-loaded`, `media-title`, `duration`, and
 `metadata` events are handled without log parsing.
 
 YouTube metadata smoke tests are manual because they depend on network/upstream
-behavior. Confirm playback starts, then check `ura status` and `ura history`
-show useful metadata and never print literal `null` for missing display values.
+behavior. Confirm playback starts, then check bare `ura` status and `ura
+history` show useful metadata and never print literal `null` for missing
+display values.
 
 ## Logging
 
@@ -170,7 +170,7 @@ context rather than full untrusted URLs.
 Always quote URLs containing shell metacharacters such as `&`:
 
 ```bash
-ura play "https://www.youtube.com/watch?v=abc123&list=ignored"
+ura "https://www.youtube.com/watch?v=abc123&list=ignored"
 ```
 
 Without quotes, the shell may split the URL before ura receives it.

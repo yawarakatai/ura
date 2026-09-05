@@ -84,11 +84,29 @@ impl PeerClient {
     }
 
     pub fn play(&self, url: &str) -> Result<()> {
-        self.post_json("/v1/play", &PlayRequest { url, source: "cli" })
+        self.play_with_loop(url, false)
+    }
+
+    pub fn play_with_loop(&self, url: &str, loop_track: bool) -> Result<()> {
+        self.post_json(
+            "/v1/play",
+            &PlayRequest {
+                url,
+                source: "cli",
+                loop_track,
+            },
+        )
     }
 
     pub fn queue(&self, url: &str) -> Result<()> {
-        self.post_json("/v1/enqueue", &PlayRequest { url, source: "cli" })
+        self.post_json(
+            "/v1/enqueue",
+            &PlayRequest {
+                url,
+                source: "cli",
+                loop_track: false,
+            },
+        )
     }
 
     pub fn control(&self, command: &str) -> Result<()> {
@@ -172,6 +190,8 @@ impl PeerClient {
 struct PlayRequest<'a> {
     url: &'a str,
     source: &'a str,
+    #[serde(rename = "loop")]
+    loop_track: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -317,6 +337,18 @@ mod tests {
         assert_authorization_header(&request);
         assert!(request.contains(r#""url":"https://youtu.be/example""#));
         assert!(request.contains(r#""source":"cli""#));
+        assert!(request.contains(r#""loop":false"#));
+    }
+
+    #[test]
+    fn looping_play_uses_http_api() {
+        let request = capture_request(r#"{"ok":true}"#, |client| {
+            client.play_with_loop("https://youtu.be/example", true)
+        });
+
+        assert_request_line(&request, "POST /v1/play HTTP/1.1");
+        assert_authorization_header(&request);
+        assert!(request.contains(r#""loop":true"#));
     }
 
     #[test]
@@ -329,6 +361,7 @@ mod tests {
         assert_authorization_header(&request);
         assert!(request.contains(r#""url":"https://youtu.be/example""#));
         assert!(request.contains(r#""source":"cli""#));
+        assert!(request.contains(r#""loop":false"#));
     }
 
     #[test]
