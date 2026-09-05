@@ -33,7 +33,7 @@ use crate::{
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Destination {
-    SelfNode { name: String },
+    SelfNode,
     Peer(Peer),
 }
 
@@ -369,7 +369,7 @@ where
 {
     let destination = resolve_destination(runtime.config_path.as_deref())?;
     let (url, token) = match destination {
-        Destination::SelfNode { .. } => (runtime.local_url.clone(), runtime.local_token.clone()),
+        Destination::SelfNode => (runtime.local_url.clone(), runtime.local_token.clone()),
         Destination::Peer(peer) => (peer.url, peer.token),
     };
     tokio::task::spawn_blocking(move || {
@@ -382,10 +382,6 @@ where
 
 pub fn resolve_destination(config_path: Option<&Path>) -> Result<Destination> {
     let config = DeviceConfig::load(config_path)?;
-    let local_name = config
-        .local_name
-        .clone()
-        .unwrap_or_else(default_device_name);
 
     if let Some(selected) = &config.selected_device {
         let peer = config
@@ -397,7 +393,7 @@ pub fn resolve_destination(config_path: Option<&Path>) -> Result<Destination> {
         return Ok(Destination::Peer(peer));
     }
 
-    Ok(Destination::SelfNode { name: local_name })
+    Ok(Destination::SelfNode)
 }
 
 pub fn device_set(config_path: Option<&Path>) -> Result<DeviceSet> {
@@ -697,7 +693,7 @@ mod tests {
     fn empty_config_resolves_to_this_device() {
         let path = unique_path("self");
         let destination = resolve_destination(Some(&path)).expect("resolve destination");
-        assert!(matches!(destination, Destination::SelfNode { .. }));
+        assert!(matches!(destination, Destination::SelfNode));
     }
 
     #[test]
@@ -714,7 +710,7 @@ token = "receiver-token"
 
         assert!(matches!(
             resolve_destination(Some(&path)).expect("resolve destination"),
-            Destination::SelfNode { .. }
+            Destination::SelfNode
         ));
         let devices = device_set(Some(&path)).expect("list devices");
         assert_eq!(devices.devices.len(), 1);
@@ -741,7 +737,7 @@ token = "secret"
         let destination = resolve_destination(Some(&path)).expect("resolve destination");
         match destination {
             Destination::Peer(peer) => assert_eq!(peer.name, "living"),
-            Destination::SelfNode { .. } => panic!("expected peer"),
+            Destination::SelfNode => panic!("expected peer"),
         }
         let _ = fs::remove_file(path);
     }
