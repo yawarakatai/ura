@@ -27,7 +27,6 @@ use crate::{
         normalize_peer_address,
     },
     db::HistoryEntry,
-    local_api::run_local_api,
     mpv::{LoopStatus, MpvStatus},
     peer_api::run_peer_api,
 };
@@ -232,39 +231,19 @@ pub async fn run_node(bind: SocketAddr, config_path: Option<PathBuf>) -> Result<
         node_shutdown_rx,
     ));
 
-    let (local_api_shutdown, local_api_shutdown_rx) = oneshot::channel();
-    let mut local_api_shutdown = Some(local_api_shutdown);
-    let mut local_api_task = tokio::spawn(run_local_api(local_url, local_api_shutdown_rx));
-
     tokio::select! {
         result = &mut peer_api_task => {
             if let Some(shutdown) = node_shutdown.take() {
                 let _ = shutdown.send(());
             }
-            if let Some(shutdown) = local_api_shutdown.take() {
-                let _ = shutdown.send(());
-            }
             flatten_task_result(result, "peer API")?;
             flatten_task_result(node_task.await, "node control socket")?;
-            flatten_task_result(local_api_task.await, "local control API")?;
             Ok(())
         }
         result = &mut node_task => {
-            if let Some(shutdown) = local_api_shutdown.take() {
-                let _ = shutdown.send(());
-            }
             flatten_task_result(result, "node control socket")?;
             peer_api_task.abort();
-            let _ = local_api_task.await;
-            Ok(())
-        }
-        result = &mut local_api_task => {
-            if let Some(shutdown) = node_shutdown.take() {
-                let _ = shutdown.send(());
-            }
-            flatten_task_result(result, "local control API")?;
-            peer_api_task.abort();
-            let _ = node_task.await;
+            let _ = peer_api_task.await;
             Ok(())
         }
     }

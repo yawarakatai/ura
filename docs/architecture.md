@@ -7,9 +7,9 @@ route local commands to a paired peer. Nodes do not have fixed sending or
 receiving roles in the user-facing model.
 
 ```text
-Firefox / ura CLI
-        │
-        ▼
+ura CLI
+   │
+   ▼
 ┌──────────────────┐
 │ local ura node   │
 └────────┬─────────┘
@@ -33,14 +33,11 @@ This prevents routing loops and accidental multi-hop playback.
 
 ## Runtime Components
 
-`ura daemon` supervises three control surfaces around one local playback backend:
+`ura daemon` supervises two control surfaces around one local playback backend:
 
 ```text
 $XDG_RUNTIME_DIR/ura/node.sock
   local CLI routing and device selection
-
-127.0.0.1:8766
-  loopback-only browser control API
 
 <configured bind>:8765
   authenticated peer HTTP API
@@ -50,9 +47,7 @@ The same process also starts and supervises `mpv`, observes structured mpv JSON
 IPC events, records playback history in SQLite, and owns pairing state.
 
 The default peer bind is `127.0.0.1:8765`. LAN or Tailscale exposure requires an
-explicit `--bind`, `URA_BIND`, or `bind` setting. The browser control API is
-always bound separately to `127.0.0.1:8766`; exposing the peer API never exposes
-browser routing controls to the LAN.
+explicit `--bind`, `URA_BIND`, or `bind` setting.
 
 ## Destinations
 
@@ -136,48 +131,6 @@ The node socket is the authoritative local routing boundary. A request arriving
 here may resolve the selected peer. A request arriving from the peer HTTP API
 does not enter this routing boundary.
 
-## Browser Control API
-
-Firefox does not store or contact remote peers directly in `0.4.0`. It talks
-only to:
-
-```text
-http://127.0.0.1:8766
-```
-
-Authenticated routes are:
-
-```text
-POST /v1/play
-POST /v1/enqueue
-POST /v1/control
-GET  /v1/status
-GET  /v1/history
-GET  /v1/devices
-POST /v1/select
-```
-
-These routes call the local node socket, so Firefox and the CLI share the same
-selected destination.
-
-The browser API authenticates only against active authorized-client token hashes
-in SQLite. Firefox is authorized once through the existing six-digit pairing
-flow and stores only its local-node credential plus extension preferences.
-Remote peer addresses and peer credentials remain owned by ura.
-
-For setup, the browser API also exposes local proxies for:
-
-```text
-GET  /v1/pair/info
-POST /v1/pair/claim
-```
-
-They proxy the already-running node's pairing session; they do not create a new
-pairing mechanism or expose a way to start pairing over HTTP. Because this
-loopback API is new in `0.4.0`, its pairing responses use `node_name` directly.
-
-The Firefox manifest host permission is restricted to localhost.
-
 ## Peer HTTP API
 
 The peer API remains on the configured `ura daemon` bind address. It is the
@@ -227,8 +180,8 @@ returned credential as a peer.
 The current network pairing protocol is version 1 and remains asymmetric at the
 credential level: the initiating node stores a plaintext bearer token for the
 peer, while the paired node stores only its hash. Pairing protocol v1 keeps the
-wire field name `receiver_name` for compatibility; Rust internals and the local
-browser API call the same value `node_name`.
+wire field name `receiver_name` for compatibility; Rust internals call the
+same value `node_name`.
 
 A future protocol can make peer identity/trust symmetric without changing the
 routing invariant described above.

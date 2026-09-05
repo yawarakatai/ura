@@ -77,7 +77,6 @@
               fenixPkgs.stable.rust-analyzer
 
               pkgs.mpv
-              pkgs.nodejs_22
               pkgs.sqlite
               pkgs.yt-dlp
             ];

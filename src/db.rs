@@ -642,7 +642,7 @@ mod tests {
         let token = "abcdef0123456789abcdef0123456789";
 
         database
-            .authorize_client("firefox", token)
+            .authorize_client("desktop-client", token)
             .expect("authorize device");
         assert!(
             database
@@ -653,7 +653,7 @@ mod tests {
         let conn = Connection::open(&path).expect("open raw connection");
         let (token_hash, last_seen_at): (String, Option<String>) = conn
             .query_row(
-                "SELECT token_hash, last_seen_at FROM authorized_devices WHERE name = 'firefox'",
+                "SELECT token_hash, last_seen_at FROM authorized_devices WHERE name = 'desktop-client'",
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
@@ -671,7 +671,7 @@ mod tests {
         let database = Database::open(path.clone()).expect("open database");
 
         database
-            .authorize_client("firefox", "abcdef0123456789abcdef0123456789")
+            .authorize_client("desktop-client", "abcdef0123456789abcdef0123456789")
             .expect("authorize device");
         assert!(
             !database
@@ -682,7 +682,7 @@ mod tests {
         let conn = Connection::open(&path).expect("open raw connection");
         let last_seen_at: Option<String> = conn
             .query_row(
-                "SELECT last_seen_at FROM authorized_devices WHERE name = 'firefox'",
+                "SELECT last_seen_at FROM authorized_devices WHERE name = 'desktop-client'",
                 [],
                 |row| row.get(0),
             )

@@ -6,9 +6,9 @@
 Every machine running `ura` is a node: it can play audio itself and it can send playback to a paired peer.
 
 ```text
-Firefox / ura CLI
-        │
-        ▼
+ura CLI
+   │
+   ▼
 ┌──────────────────┐
 │ local ura node   │
 └────────┬─────────┘
@@ -39,7 +39,6 @@ With `ura`, all of those are the same operation: select a playback device.
 - Toggle pause/resume, stop, inspect status, and replay earlier tracks through the same selected device
 - Pair peers with a temporary six-digit code
 - Switch devices with an interactive terminal selector
-- Share the same selected device between the CLI and Firefox extension
 - Keep `mpv` and its IPC interface local to each node
 
 ## Quick start
@@ -136,29 +135,6 @@ $ ura history replay
 History and replay follow the same selected-device routing as other playback
 commands.
 
-## Firefox extension
-
-The Firefox extension no longer connects to remote peers directly. It talks only to the local ura node on a loopback-only control API, and the local node decides where playback goes.
-
-Authorize Firefox once:
-
-```console
-$ ura pair
-```
-
-Open the extension options, enter the six-digit code, and choose a browser name such as `Firefox`.
-The extension stores only the credential for the local node. Remote peer addresses and peer credentials remain owned by ura itself.
-
-After that, changing the destination from either interface changes the same node state:
-
-```console
-$ ura device select
-```
-
-The extension options show the same selected device and can switch it too. Clicking the toolbar button sends the current tab to whichever device is selected at that moment.
-
-The browser-facing control API listens only on `127.0.0.1:8766`. The peer API may be exposed on the LAN with `--bind`, but the browser control API is never bound to that address.
-
 ## Node model
 
 Local commands are sent to the local `ura` node first. The node resolves the selected destination:
@@ -168,10 +144,8 @@ Local commands are sent to the local `ura` node first. The node resolves the sel
 
 Peer HTTP requests never resolve the receiving node's selected device. They always operate on that node's own `mpv` instance. This prevents accidental multi-hop forwarding and keeps destination selection local to the initiating node.
 
-Firefox follows the same rule: it submits commands to the local node rather than contacting the selected peer itself.
-
 ## Command model
 
 Playback, status, and history always go through the running local node. Device
-selection is persistent and shared with Firefox; there is no one-shot
-per-command destination override or direct-peer CLI mode.
+selection is persistent; there is no one-shot per-command destination override
+or direct-peer CLI mode.

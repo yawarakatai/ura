@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-for tool in mpv node yt-dlp sqlite3; do
+for tool in mpv yt-dlp sqlite3; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         echo "missing required tool: $tool" >&2
         exit 1
@@ -12,5 +12,4 @@ cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 cargo check --locked --all-targets
-node --test extension/lib.test.js
 nix flake check

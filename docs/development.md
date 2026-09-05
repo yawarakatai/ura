@@ -11,7 +11,7 @@ expected toolchain or runtime tools.
 nix develop
 ```
 
-The shell includes Rust tooling plus Node.js, `mpv`, `yt-dlp`, and SQLite.
+The shell includes Rust tooling plus `mpv`, `yt-dlp`, and SQLite.
 You can also run one command inside the shell:
 
 ```bash
@@ -26,9 +26,8 @@ For code changes, verify in this order:
 2. `nix develop -c cargo clippy --locked --all-targets -- -D warnings`
 3. `nix develop -c cargo test --locked`
 4. `nix develop -c cargo check --locked --all-targets`
-5. `nix develop -c node --test extension/lib.test.js`
-6. `nix develop -c nix flake check`
-7. Run the relevant manual smoke test when user-visible routing or playback changes.
+5. `nix develop -c nix flake check`
+6. Run the relevant manual smoke test when user-visible routing or playback changes.
 
 The full local gate is:
 
@@ -106,30 +105,6 @@ cover:
    than once per 60 seconds.
 6. Codes, plaintext credentials, token hashes, and Authorization headers do not
    appear in logs.
-
-## Firefox Temporary Extension Test
-
-1. Start the local node with `cargo run -- daemon` or the installed user service.
-2. Open Firefox and go to `about:debugging#/runtime/this-firefox`.
-3. Choose "Load Temporary Add-on" and select `extension/manifest.json`.
-4. Run `cargo run -- pair` and keep the six-digit code visible.
-5. Open the extension options.
-6. Enter the code and a browser name such as `Firefox`, then connect.
-7. Confirm the extension lists the same playback devices as
-   `cargo run -- device list`.
-8. Select a peer in the extension and confirm `cargo run -- device list` reports
-   the same selected device.
-9. Select this device from the CLI and confirm the extension reflects it.
-10. Open a supported YouTube URL and click the toolbar action; confirm the node's
-    current selected destination plays it.
-11. Confirm no remote peer address/token is stored by new extension state and no
-    token appears in UI, console output, or notifications.
-12. Stop the local node and confirm the extension reports that the local ura node
-    is unreachable.
-
-The Firefox host permission should remain restricted to localhost. The browser
-control API is fixed to `127.0.0.1:8766` in `0.4.0` and should never bind to the
-peer API's LAN address.
 
 ## Fake mpv Lifecycle Tests
 

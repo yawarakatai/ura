@@ -22,5 +22,3 @@ jobs:
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Run Rust tests
         run: cargo test --locked
-      - name: Run Firefox extension tests
-        run: node --test extension/lib.test.js

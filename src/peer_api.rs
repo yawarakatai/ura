@@ -1393,7 +1393,7 @@ mod tests {
             .expect("authorize first");
         state
             .database
-            .authorize_client("firefox", "fedcba9876543210fedcba9876543210")
+            .authorize_client("desktop-client", "fedcba9876543210fedcba9876543210")
             .expect("authorize second");
         state
             .database

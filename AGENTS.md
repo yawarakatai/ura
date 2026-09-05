@@ -11,9 +11,9 @@ Keep the project small, boring, explicit, and useful.
 ## Architecture Summary
 
 ```text
-Firefox / ura CLI
-        │
-        ▼
+ura CLI
+   │
+   ▼
   local ura node
         │ selected destination
     ┌───┴────┐
@@ -26,7 +26,6 @@ Firefox / ura CLI
 The long-running node exposes:
 
 - `$XDG_RUNTIME_DIR/ura/node.sock` for local CLI routing
-- `127.0.0.1:8766` for the loopback-only Firefox control API
 - the configured peer HTTP bind, default `127.0.0.1:8765`
 - local mpv JSON IPC and playback history in SQLite
 
@@ -47,10 +46,6 @@ Do not add Windows or macOS support unless explicitly requested.
   playback backend and must never be forwarded through its selected peer.
 - This device is an implicit destination and must not require self-pairing or a
   fake remote-device entry.
-- CLI and Firefox share destination state through the local ura node; do not
-  create a second browser-owned peer list or selected-device state.
-- The Firefox control API remains loopback-only. LAN/Tailscale exposure applies
-  only to the explicitly configured peer API.
 - `mpv` IPC remains local-only and must not be exposed over TCP.
 - `mpv` runtime state and metadata come from structured JSON IPC events and
   properties, not parsed human-readable logs.
@@ -130,7 +125,6 @@ verification checklist. At minimum consider:
 1. `cargo fmt --check`
 2. `cargo clippy --locked --all-targets -- -D warnings`
 3. `cargo test --locked`
-4. `node --test extension/lib.test.js` when extension behavior is touched
 5. manual command examples when routing/playback behavior changes
 6. no unsupported feature was accidentally added
 

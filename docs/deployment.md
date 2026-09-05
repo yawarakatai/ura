@@ -12,7 +12,6 @@ Playback commands do not daemonize ura implicitly. The long-running node owns:
 
 - the local mpv process and JSON IPC socket
 - the local CLI routing socket
-- the loopback-only Firefox control API on `127.0.0.1:8766`
 - the optional network-facing peer API
 - pairing state and playback history
 
@@ -95,15 +94,8 @@ The default peer HTTP bind is:
 127.0.0.1:8765
 ```
 
-This is sufficient for local playback and Firefox use. Firefox talks to the
-separate browser control listener:
-
-```text
-127.0.0.1:8766
-```
-
-The browser listener is not configurable in `0.4.0` and remains loopback-only.
-It is never widened when the peer API is exposed.
+This is sufficient for local playback. The CLI communicates with the local
+node through its Unix socket, while peer nodes use the configured peer API.
 
 ## Exposing A Peer
 
@@ -171,20 +163,6 @@ After pairing, select the playback destination with:
 ura device select
 ```
 
-## Firefox Authorization
-
-Firefox is authorized against its local ura node, not against every remote peer.
-
-1. Ensure the local node/user service is running.
-2. Run `ura pair` on the same machine.
-3. Enter the six-digit code in the extension options.
-
-The extension then accesses only `127.0.0.1:8766`. Remote peer credentials stay
-inside ura configuration and are never copied into new extension state.
-
-Revoking Firefox's authorized-client credential causes the extension to request
-pairing again.
-
 ## Credentials
 
 Authorized clients are stored in the SQLite database under `XDG_DATA_HOME` or
@@ -228,9 +206,6 @@ cargo run -- daemon
 If ura reports that an mpv or ura runtime socket is already in use, stop the
 existing node before starting another copy.
 
-If Firefox reports the local node as unreachable, verify that the node is
-running and that `127.0.0.1:8766` is not occupied by another process.
-
 ## Deployment Verification Checklist
 
 1. Start/enable the local node service.
@@ -242,7 +217,5 @@ running and that `127.0.0.1:8766` is not occupied by another process.
 5. Pair a second ura node and switch between self/peer with `ura device select`.
 6. Verify a peer request terminates at the receiving node even if that node has
    another selected destination.
-7. Pair Firefox locally and confirm CLI/extension selection is shared.
-8. Confirm the browser API is reachable only through loopback and the mpv IPC
-   socket remains Unix-local.
-9. Confirm no plaintext credentials appear in normal logs or device listings.
+7. Confirm the mpv IPC socket remains Unix-local.
+8. Confirm no plaintext credentials appear in normal logs or device listings.

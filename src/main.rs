@@ -762,7 +762,7 @@ mod tests {
             ],
         };
         let authorized = vec![ura::db::AuthorizedClient {
-            name: "firefox".to_string(),
+            name: "desktop-client".to_string(),
             created_at: "2026-07-10 17:35".to_string(),
             last_seen_at: None,
             revoked_at: None,
@@ -771,7 +771,7 @@ mod tests {
         let output = render_devices(&devices, &authorized);
 
         assert!(output.contains("kamo"));
-        assert!(output.contains("firefox"));
+        assert!(output.contains("desktop-client"));
         assert!(!output.contains("secret-token"));
         assert!(!output.contains("token_hash"));
     }

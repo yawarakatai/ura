@@ -17,8 +17,6 @@ The peer API currently uses plain HTTP. Use a trusted tunnel or private overlay
 if transport confidentiality is required; public-internet exposure is not a
 supported deployment model.
 
-The browser-facing control API is separate and binds only to `127.0.0.1:8766`.
-
 ## Trust Model
 
 A running ura node owns the pairing session. The six-digit code:
@@ -76,49 +74,6 @@ stores a token that authorizes it to control the paired node. The receiving node
 stores only the token hash. Symmetric node identity/trust is intentionally left
 for a future pairing protocol version.
 
-## Firefox Pairing
-
-Firefox `0.4.0` no longer pairs independently with every remote peer. It is
-authorized once against the local ura node.
-
-Setup is:
-
-```bash
-ura daemon
-ura pair
-```
-
-Then enter the displayed six-digit code in the extension options.
-
-The extension communicates only with the loopback API at:
-
-```text
-http://127.0.0.1:8766
-```
-
-The local API proxies `/v1/pair/info` and `/v1/pair/claim` to the same pairing
-session owned by the local node. This is not a separate pairing mechanism: it
-issues a normal authorized-client token through the same SQLite credential
-store used by the peer API.
-
-After pairing, Firefox stores only:
-
-```json
-{
-  "nodeToken": "...",
-  "defaultAction": "play",
-  "localDeviceName": "Firefox"
-}
-```
-
-Remote peer addresses, remote peer tokens, and the selected playback destination
-are not owned by the extension. They remain ura node state. This means CLI and
-Firefox device selection cannot drift apart.
-
-Legacy extension settings are migrated only when they contain a localhost
-credential. Old remote peer tokens are deliberately not treated as a local
-node credential.
-
 ## Pairing API
 
 Pairing protocol v1 uses:
@@ -129,7 +84,7 @@ POST /v1/pair/claim
 ```
 
 On the peer API these endpoints are unauthenticated only while a pairing session
-is active. The loopback browser API provides proxies for the same two operations.
+is active.
 
 `GET /v1/pair/info` returns:
 
@@ -208,10 +163,6 @@ url = "http://192.168.1.23:8765"
 token = "..."
 ```
 
-Firefox stores the plaintext credential issued by its local node in
-`browser.storage.local` and never receives remote peer credentials in the new
-model.
-
 ## Authentication Boundaries
 
 There are two HTTP authentication surfaces:
@@ -223,15 +174,6 @@ The network-facing peer API checks:
 1. active authorized-client token hashes in SQLite
 2. the legacy configured peer API token as a compatibility fallback
 
-### Browser Control API
-
-The loopback-only browser API checks only active authorized-client token hashes
-in SQLite. It does not accept the legacy peer API token as an implicit browser
-credential.
-
-The browser API remains bound to `127.0.0.1` even when the peer API is exposed
-on LAN or Tailscale addresses.
-
 ## Revocation
 
 Existing authorization commands remain available:
@@ -241,8 +183,8 @@ ura device authorize <name>
 ura device revoke <name>
 ```
 
-Revoking the credential used by Firefox causes subsequent browser requests to
-return unauthorized; the extension then asks the user to pair it again.
+Revoking an authorized-client credential causes subsequent requests using it
+to return unauthorized.
 
 ## Explicit Non-Goals
 
