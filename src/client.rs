@@ -6,10 +6,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use serde::{Serialize, de::DeserializeOwned};
 
-use crate::{
-    db::HistoryEntry,
-    mpv::{LoopStatus, MpvStatus},
-};
+use crate::{db::HistoryEntry, mpv::MpvStatus};
 
 pub struct PeerClient {
     base: PeerBase,
@@ -110,21 +107,7 @@ impl PeerClient {
     }
 
     pub fn control(&self, command: &str) -> Result<()> {
-        let _: ControlResponse =
-            self.post_json_response("/v1/control", &ControlRequest { command })?;
-        Ok(())
-    }
-
-    pub fn loop_status(&self) -> Result<LoopStatus> {
-        let response: ControlResponse = self.post_json_response(
-            "/v1/control",
-            &ControlRequest {
-                command: "loop-status",
-            },
-        )?;
-        response
-            .loop_status
-            .ok_or_else(|| anyhow::anyhow!("peer did not return loop status"))
+        self.post_json("/v1/control", &ControlRequest { command })
     }
 
     pub fn status(&self) -> Result<MpvStatus> {
@@ -203,11 +186,6 @@ struct ControlRequest<'a> {
 struct PairClaimRequest<'a> {
     code: &'a str,
     device_name: &'a str,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct ControlResponse {
-    loop_status: Option<LoopStatus>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -375,17 +353,6 @@ mod tests {
             assert_authorization_header(&request);
             assert!(request.contains(&format!(r#""command":"{command}""#)));
         }
-    }
-
-    #[test]
-    fn loop_status_uses_http_api() {
-        let request = capture_request(r#"{"ok":true,"loop_status":"Off"}"#, |client| {
-            client.loop_status()
-        });
-
-        assert_request_line(&request, "POST /v1/control HTTP/1.1");
-        assert_authorization_header(&request);
-        assert!(request.contains(r#""command":"loop-status""#));
     }
 
     #[test]

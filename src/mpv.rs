@@ -214,26 +214,6 @@ impl MpvClient {
         ))
     }
 
-    pub fn status(&mut self) -> Result<MpvStatus> {
-        Ok(MpvStatus {
-            pause: self.get_bool_property("pause")?,
-            idle_active: self.get_bool_property("idle-active")?,
-            path: self.get_string_property("path")?,
-            media_title: self.get_string_property("media-title")?,
-            title: None,
-            artist: None,
-            uploader: None,
-            album: None,
-            duration_seconds: self.get_number_property("duration")?,
-            position_seconds: self.get_number_property("time-pos")?,
-            playlist_pos: self.get_i64_property("playlist-pos")?,
-            playlist_count: self.get_i64_property("playlist-count")?,
-            source_url: None,
-            playback_path: None,
-            loop_status: Some(self.loop_status()?),
-        })
-    }
-
     pub fn metadata_snapshot(&mut self) -> Result<MetadataSnapshot> {
         Ok(MetadataSnapshot {
             media_title: self.get_string_property("media-title")?,

@@ -27,7 +27,7 @@ use crate::{
         normalize_peer_address,
     },
     db::HistoryEntry,
-    mpv::{LoopStatus, MpvStatus},
+    mpv::MpvStatus,
     peer_api::run_peer_api,
 };
 
@@ -72,7 +72,6 @@ enum NodeRequest {
     Control {
         action: String,
     },
-    LoopStatus,
     Status,
     History,
     Devices,
@@ -85,7 +84,6 @@ enum NodeRequest {
 #[serde(tag = "type", rename_all = "snake_case")]
 enum NodeResponse {
     Ok,
-    LoopStatus { status: LoopStatus },
     Status { status: Box<MpvStatus> },
     History { entries: Vec<HistoryEntry> },
     Devices { devices: DeviceSet },
@@ -138,13 +136,6 @@ impl NodeClient {
         self.expect_ok(NodeRequest::Control {
             action: action.to_string(),
         })
-    }
-
-    pub fn loop_status(&self) -> Result<LoopStatus> {
-        match self.request(NodeRequest::LoopStatus)? {
-            NodeResponse::LoopStatus { status } => Ok(status),
-            other => unexpected_response(other),
-        }
     }
 
     pub fn status(&self) -> Result<MpvStatus> {
@@ -350,10 +341,6 @@ async fn dispatch(request: NodeRequest, runtime: &NodeRuntime) -> Result<NodeRes
         NodeRequest::Control { action } => {
             route(runtime, move |client| client.control(&action)).await?;
             Ok(NodeResponse::Ok)
-        }
-        NodeRequest::LoopStatus => {
-            let status = route(runtime, |client| client.loop_status()).await?;
-            Ok(NodeResponse::LoopStatus { status })
         }
         NodeRequest::Status => {
             let status = route(runtime, |client| client.status()).await?;
