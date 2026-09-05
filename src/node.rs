@@ -380,8 +380,76 @@ where
     .map_err(|error| anyhow::anyhow!("destination request task failed: {error}"))?
 }
 
+struct ConfigStore {
+    path: PathBuf,
+}
+
+impl ConfigStore {
+    fn new(path_override: Option<&Path>) -> Result<Self> {
+        Ok(Self {
+            path: config_path(path_override)?,
+        })
+    }
+
+    fn load(&self) -> Result<DeviceConfig> {
+        DeviceConfig::load(Some(&self.path))
+    }
+
+    fn persist(&self, config: &DeviceConfig) -> Result<()> {
+        let mut root = load_toml_root(&self.path)?;
+        let table = root
+            .as_table_mut()
+            .ok_or_else(|| anyhow::anyhow!("config root must be a TOML table"))?;
+
+        table.remove("receiver_url");
+        table.remove("peer_url");
+        table.remove("token");
+
+        match &config.selected_device {
+            Some(name) => {
+                table.insert(
+                    "selected_device".to_string(),
+                    toml::Value::String(name.clone()),
+                );
+            }
+            None => {
+                table.remove("selected_device");
+            }
+        }
+
+        if let Some(local_name) = &config.local_name {
+            let mut local = toml::map::Map::new();
+            local.insert("name".to_string(), toml::Value::String(local_name.clone()));
+            table.insert("local".to_string(), toml::Value::Table(local));
+        }
+
+        if config.devices.is_empty() {
+            table.remove("devices");
+        } else {
+            let devices = config
+                .devices
+                .iter()
+                .map(|device| {
+                    let mut peer = toml::map::Map::new();
+                    peer.insert("name".to_string(), toml::Value::String(device.name.clone()));
+                    peer.insert("url".to_string(), toml::Value::String(device.url.clone()));
+                    peer.insert(
+                        "token".to_string(),
+                        toml::Value::String(device.token.clone()),
+                    );
+                    toml::Value::Table(peer)
+                })
+                .collect();
+            table.insert("devices".to_string(), toml::Value::Array(devices));
+        }
+
+        write_toml_atomic(&self.path, &root)
+    }
+}
+
 pub fn resolve_destination(config_path: Option<&Path>) -> Result<Destination> {
-    let config = DeviceConfig::load(config_path)?;
+    let store = ConfigStore::new(config_path)?;
+    let config = store.load()?;
 
     if let Some(selected) = &config.selected_device {
         let peer = config
@@ -397,7 +465,8 @@ pub fn resolve_destination(config_path: Option<&Path>) -> Result<Destination> {
 }
 
 pub fn device_set(config_path: Option<&Path>) -> Result<DeviceSet> {
-    let config = DeviceConfig::load(config_path)?;
+    let store = ConfigStore::new(config_path)?;
+    let config = store.load()?;
     let local_name = config
         .local_name
         .clone()
@@ -428,7 +497,8 @@ pub fn add_peer(
     token: &str,
 ) -> Result<()> {
     validate_peer_input(name, token)?;
-    let mut config = DeviceConfig::load(config_path_override)?;
+    let store = ConfigStore::new(config_path_override)?;
+    let mut config = store.load()?;
     let local_name = config
         .local_name
         .clone()
@@ -444,7 +514,7 @@ pub fn add_peer(
         url: normalize_peer_address(address)?,
         token: token.to_string(),
     });
-    persist_device_config(config_path_override, &config)
+    store.persist(&config)
 }
 
 pub fn add_paired_peer(
@@ -461,7 +531,8 @@ pub fn add_paired_peer(
         anyhow::bail!("peer name `{peer_name}` conflicts with this device");
     }
 
-    let mut config = DeviceConfig::load(config_path_override)?;
+    let store = ConfigStore::new(config_path_override)?;
+    let mut config = store.load()?;
     if config.devices.iter().any(|device| device.name == peer_name) {
         anyhow::bail!("device `{peer_name}` already exists");
     }
@@ -474,11 +545,12 @@ pub fn add_paired_peer(
     if select {
         config.selected_device = Some(peer_name.to_string());
     }
-    persist_device_config(config_path_override, &config)
+    store.persist(&config)
 }
 
 pub fn remove_peer(config_path_override: Option<&Path>, name: &str) -> Result<()> {
-    let mut config = DeviceConfig::load(config_path_override)?;
+    let store = ConfigStore::new(config_path_override)?;
+    let mut config = store.load()?;
     let local_name = config
         .local_name
         .clone()
@@ -495,11 +567,12 @@ pub fn remove_peer(config_path_override: Option<&Path>, name: &str) -> Result<()
     if config.selected_device.as_deref() == Some(name) {
         config.selected_device = None;
     }
-    persist_device_config(config_path_override, &config)
+    store.persist(&config)
 }
 
 pub fn select_device(config_path_override: Option<&Path>, name: &str) -> Result<String> {
-    let mut config = DeviceConfig::load(config_path_override)?;
+    let store = ConfigStore::new(config_path_override)?;
+    let mut config = store.load()?;
     let local_name = config
         .local_name
         .clone()
@@ -508,8 +581,8 @@ pub fn select_device(config_path_override: Option<&Path>, name: &str) -> Result<
 
     if selecting_self {
         config.selected_device = None;
-        if config_path(config_path_override)?.exists() || !config.devices.is_empty() {
-            persist_device_config(config_path_override, &config)?;
+        if store.path.exists() || !config.devices.is_empty() {
+            store.persist(&config)?;
         }
         return Ok(local_name);
     }
@@ -518,60 +591,8 @@ pub fn select_device(config_path_override: Option<&Path>, name: &str) -> Result<
         anyhow::bail!("unknown device `{name}`");
     }
     config.selected_device = Some(name.to_string());
-    persist_device_config(config_path_override, &config)?;
+    store.persist(&config)?;
     Ok(name.to_string())
-}
-
-fn persist_device_config(config_path_override: Option<&Path>, config: &DeviceConfig) -> Result<()> {
-    let path = config_path(config_path_override)?;
-    let mut root = load_toml_root(&path)?;
-    let table = root
-        .as_table_mut()
-        .ok_or_else(|| anyhow::anyhow!("config root must be a TOML table"))?;
-
-    table.remove("receiver_url");
-    table.remove("peer_url");
-    table.remove("token");
-
-    match &config.selected_device {
-        Some(name) => {
-            table.insert(
-                "selected_device".to_string(),
-                toml::Value::String(name.clone()),
-            );
-        }
-        None => {
-            table.remove("selected_device");
-        }
-    }
-
-    if let Some(local_name) = &config.local_name {
-        let mut local = toml::map::Map::new();
-        local.insert("name".to_string(), toml::Value::String(local_name.clone()));
-        table.insert("local".to_string(), toml::Value::Table(local));
-    }
-
-    if config.devices.is_empty() {
-        table.remove("devices");
-    } else {
-        let devices = config
-            .devices
-            .iter()
-            .map(|device| {
-                let mut peer = toml::map::Map::new();
-                peer.insert("name".to_string(), toml::Value::String(device.name.clone()));
-                peer.insert("url".to_string(), toml::Value::String(device.url.clone()));
-                peer.insert(
-                    "token".to_string(),
-                    toml::Value::String(device.token.clone()),
-                );
-                toml::Value::Table(peer)
-            })
-            .collect();
-        table.insert("devices".to_string(), toml::Value::Array(devices));
-    }
-
-    write_toml_atomic(&path, &root)
 }
 
 fn load_toml_root(path: &Path) -> Result<toml::Value> {
