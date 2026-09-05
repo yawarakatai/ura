@@ -7,9 +7,10 @@ use std::{
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use unicode_width::UnicodeWidthStr;
 use ura::{
+    admin_socket::{PairControlRequest, PairControlResponse},
     cli::{Cli, Command, DeviceCommand, HistoryCommand},
     client::PeerPairingClient,
     config::{
@@ -394,39 +395,15 @@ where
             socket_path.display()
         )
     })?;
-    let request = serde_json::to_vec(&PairControlRequest { command })?;
+    let request = serde_json::to_vec(&PairControlRequest {
+        command: command.to_string(),
+    })?;
     stream.write_all(&request)?;
     stream.shutdown(Shutdown::Write)?;
 
     let mut response = String::new();
     stream.read_to_string(&mut response)?;
     serde_json::from_str(&response).with_context(|| "failed to parse pairing response")
-}
-
-#[derive(Debug, Serialize)]
-struct PairControlRequest<'a> {
-    command: &'a str,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum PairControlResponse {
-    PairStart {
-        code: String,
-        expires_in: u64,
-        address: String,
-    },
-    PairStatus {
-        status: PairingStatus,
-        completion: PairingCompletion,
-    },
-    Ok {
-        #[serde(rename = "ok")]
-        _ok: bool,
-    },
-    Error {
-        error: String,
-    },
 }
 
 fn print_status(status: &MpvStatus) {

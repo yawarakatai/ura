@@ -1,3 +1,4 @@
+pub mod admin_socket;
 pub mod cli;
 pub mod client;
 pub mod config;
