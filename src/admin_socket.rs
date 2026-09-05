@@ -132,7 +132,7 @@ pub enum PairControlResponse {
     },
 }
 
-fn display_address_for_bind(bind: SocketAddr) -> String {
+pub fn display_address_for_bind(bind: SocketAddr) -> String {
     let ip = match bind.ip() {
         IpAddr::V4(ip) if ip.is_unspecified() => likely_local_ipv4(),
         IpAddr::V6(ip) if ip.is_unspecified() => likely_local_ipv4(),

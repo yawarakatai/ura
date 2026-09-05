@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use tokio::{net::TcpListener, sync::oneshot, task::JoinHandle};
 use tracing::{error, info, warn};
 
+pub use crate::admin_socket::display_address_for_bind;
 use crate::admin_socket::run_control_socket;
 use crate::config::{
     default_control_socket_path, default_db_path, default_device_name, default_mpv_socket_path,
