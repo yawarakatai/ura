@@ -765,7 +765,6 @@ mod tests {
             name: "desktop-client".to_string(),
             created_at: "2026-07-10 17:35".to_string(),
             last_seen_at: None,
-            revoked_at: None,
         }];
 
         let output = render_devices(&devices, &authorized);

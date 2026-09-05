@@ -37,7 +37,6 @@ pub struct AuthorizedClient {
     pub name: String,
     pub created_at: String,
     pub last_seen_at: Option<String>,
-    pub revoked_at: Option<String>,
 }
 
 impl Database {
@@ -237,7 +236,7 @@ impl Database {
     pub fn authorized_clients(&self) -> Result<Vec<AuthorizedClient>> {
         let conn = self.connect()?;
         let mut statement = conn.prepare(
-            "SELECT name, created_at, last_seen_at, revoked_at
+            "SELECT name, created_at, last_seen_at
              FROM authorized_devices
              WHERE revoked_at IS NULL
              ORDER BY name",
@@ -247,7 +246,6 @@ impl Database {
                 name: row.get(0)?,
                 created_at: row.get(1)?,
                 last_seen_at: row.get(2)?,
-                revoked_at: row.get(3)?,
             })
         })?;
 
