@@ -2,9 +2,7 @@ use std::{
     fs,
     io::ErrorKind,
     net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket},
-    os::unix::{fs::FileTypeExt, fs::PermissionsExt, net::UnixStream},
-    path::{Path, PathBuf},
-    process::{Command as StdCommand, ExitStatus, Stdio},
+    path::PathBuf,
     sync::Arc,
 };
 
@@ -21,7 +19,6 @@ use serde::{Deserialize, Serialize};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, UnixListener},
-    process::{Child, Command as TokioCommand},
     sync::oneshot,
     task::JoinHandle,
 };
@@ -38,6 +35,10 @@ use crate::mpv::{
     observed_status, register_playback_request, rollback_playback_request, shared_playback_state,
 };
 use crate::pairing::{ClaimDecision, PairingCompletion, PairingManager, PairingStatus};
+use crate::playback_runtime::{
+    PlaybackRuntime, create_runtime_dir, ensure_program_in_path, exit_status_result,
+    prepare_control_socket_path,
+};
 
 pub async fn run_peer_api(bind: SocketAddr, node_token: String) -> AnyhowResult<()> {
     info!("peer API startup");
@@ -746,35 +747,6 @@ fn validate_supported_url(url: &str) -> std::result::Result<String, AppError> {
         .map_err(|error| AppError::new(StatusCode::BAD_REQUEST, error.to_string()))
 }
 
-async fn supervise_mpv_child(
-    mut mpv: Child,
-    mut shutdown: oneshot::Receiver<()>,
-) -> AnyhowResult<ExitStatus> {
-    tokio::select! {
-        result = mpv.wait() => {
-            result.with_context(|| "failed to wait for mpv child process")
-        }
-        _ = &mut shutdown => {
-            terminate_mpv_child(&mut mpv).await
-        }
-    }
-}
-
-async fn terminate_mpv_child(mpv: &mut Child) -> AnyhowResult<ExitStatus> {
-    if let Some(status) = mpv
-        .try_wait()
-        .with_context(|| "failed to check mpv child process status")?
-    {
-        return Ok(status);
-    }
-
-    mpv.start_kill()
-        .with_context(|| "failed to terminate mpv child process")?;
-    mpv.wait()
-        .await
-        .with_context(|| "failed to wait for mpv child process after termination")
-}
-
 fn signal_shutdown(shutdown: &mut Option<oneshot::Sender<()>>) {
     if let Some(shutdown) = shutdown.take() {
         let _ = shutdown.send(());
@@ -792,205 +764,6 @@ fn task_result<T>(
     result.with_context(|| format!("{task_name} task failed"))?
 }
 
-fn exit_status_result(status: ExitStatus) -> AnyhowResult<()> {
-    if status.success() {
-        Ok(())
-    } else {
-        Err(anyhow::anyhow!("mpv exited with status {status}"))
-    }
-}
-
-struct PlaybackRuntime {
-    socket_path: PathBuf,
-    shutdown: Option<oneshot::Sender<()>>,
-    task: Option<JoinHandle<AnyhowResult<ExitStatus>>>,
-}
-
-impl PlaybackRuntime {
-    fn start(socket_path: PathBuf) -> AnyhowResult<Self> {
-        prepare_mpv_socket_path(&socket_path)?;
-        let mpv = TokioCommand::new("mpv")
-            .args(mpv_args(&socket_path))
-            .stdin(Stdio::null())
-            .spawn()
-            .with_context(|| "failed to start mpv")?;
-        match mpv.id() {
-            Some(pid) => info!(pid, "mpv child started"),
-            None => info!("mpv child started"),
-        }
-        let (shutdown, shutdown_rx) = oneshot::channel();
-        let task = tokio::spawn(supervise_mpv_child(mpv, shutdown_rx));
-
-        Ok(Self {
-            socket_path,
-            shutdown: Some(shutdown),
-            task: Some(task),
-        })
-    }
-
-    fn into_parts(
-        mut self,
-    ) -> (
-        PathBuf,
-        Option<oneshot::Sender<()>>,
-        JoinHandle<AnyhowResult<ExitStatus>>,
-    ) {
-        let socket_path = std::mem::take(&mut self.socket_path);
-        let shutdown = self.shutdown.take();
-        let task = self
-            .task
-            .take()
-            .expect("playback process task should exist");
-        (socket_path, shutdown, task)
-    }
-}
-
-impl Drop for PlaybackRuntime {
-    fn drop(&mut self) {
-        if let Some(shutdown) = self.shutdown.take() {
-            let _ = shutdown.send(());
-        }
-    }
-}
-
-fn create_runtime_dir(socket_path: &Path) -> AnyhowResult<()> {
-    let runtime_dir = socket_path
-        .parent()
-        .expect("default mpv socket path should include a runtime directory");
-    fs::create_dir_all(runtime_dir).with_context(|| {
-        format!(
-            "failed to create runtime directory {}",
-            runtime_dir.display()
-        )
-    })?;
-    fs::set_permissions(runtime_dir, fs::Permissions::from_mode(0o700)).with_context(|| {
-        format!(
-            "failed to set runtime directory permissions on {}",
-            runtime_dir.display()
-        )
-    })
-}
-
-fn prepare_mpv_socket_path(socket_path: &Path) -> AnyhowResult<()> {
-    let metadata = match fs::symlink_metadata(socket_path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
-        Err(error) => {
-            return Err(error).with_context(|| {
-                format!(
-                    "failed to inspect mpv IPC socket path {}",
-                    socket_path.display()
-                )
-            });
-        }
-    };
-
-    if !metadata.file_type().is_socket() {
-        return Err(anyhow::anyhow!(
-            "mpv IPC socket path {} exists but is not a Unix socket",
-            socket_path.display()
-        ));
-    }
-
-    match UnixStream::connect(socket_path) {
-        Ok(_) => Err(anyhow::anyhow!(
-            "mpv IPC socket {} is already in use; stop the existing node before starting a new one",
-            socket_path.display()
-        )),
-        Err(error) if error.kind() == ErrorKind::ConnectionRefused => {
-            fs::remove_file(socket_path).with_context(|| {
-                format!(
-                    "failed to remove stale mpv IPC socket {}",
-                    socket_path.display()
-                )
-            })?;
-            Ok(())
-        }
-        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error).with_context(|| {
-            format!(
-                "failed to connect to existing mpv IPC socket {}",
-                socket_path.display()
-            )
-        }),
-    }
-}
-
-fn prepare_control_socket_path(socket_path: &Path) -> AnyhowResult<()> {
-    create_runtime_dir(socket_path)?;
-    let metadata = match fs::symlink_metadata(socket_path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
-        Err(error) => {
-            return Err(error).with_context(|| {
-                format!(
-                    "failed to inspect control socket path {}",
-                    socket_path.display()
-                )
-            });
-        }
-    };
-
-    if !metadata.file_type().is_socket() {
-        return Err(anyhow::anyhow!(
-            "control socket path {} exists but is not a Unix socket",
-            socket_path.display()
-        ));
-    }
-
-    match UnixStream::connect(socket_path) {
-        Ok(_) => Err(anyhow::anyhow!(
-            "control socket {} is already in use; stop the existing node before starting a new one",
-            socket_path.display()
-        )),
-        Err(error) if error.kind() == ErrorKind::ConnectionRefused => {
-            fs::remove_file(socket_path).with_context(|| {
-                format!(
-                    "failed to remove stale control socket {}",
-                    socket_path.display()
-                )
-            })?;
-            Ok(())
-        }
-        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error).with_context(|| {
-            format!(
-                "failed to connect to existing control socket {}",
-                socket_path.display()
-            )
-        }),
-    }
-}
-
-fn ensure_program_in_path(program: &str) -> AnyhowResult<()> {
-    let status = StdCommand::new(program)
-        .arg("--version")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .with_context(|| format!("failed to find `{program}` in PATH"))?;
-
-    if status.success() {
-        Ok(())
-    } else {
-        Err(anyhow::anyhow!(
-            "`{program} --version` failed with status {status}"
-        ))
-    }
-}
-
-fn mpv_args(socket_path: &Path) -> Vec<String> {
-    vec![
-        "--idle=yes".to_string(),
-        "--no-video".to_string(),
-        "--force-window=no".to_string(),
-        "--terminal=no".to_string(),
-        format!("--input-ipc-server={}", socket_path.display()),
-        "--ytdl-format=bestaudio/best".to_string(),
-    ]
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -998,7 +771,10 @@ mod tests {
     use std::{
         io::{Read, Write},
         os::unix::net::UnixListener,
+        path::Path,
     };
+
+    use crate::playback_runtime::{mpv_args, prepare_mpv_socket_path};
 
     fn unique_path(name: &str) -> PathBuf {
         let nanos = std::time::SystemTime::now()
