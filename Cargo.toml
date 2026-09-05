@@ -15,3 +15,4 @@ tokio = { version = "1.0", features = ["io-util", "macros", "net", "process", "r
 toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+unicode-width = "0.2"

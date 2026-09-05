@@ -8,6 +8,7 @@ use std::{
 use anyhow::{Context, Result};
 use clap::Parser;
 use serde::{Deserialize, Serialize};
+use unicode_width::UnicodeWidthStr;
 use ura::{
     cli::{Cli, Command, ConfigCommand, DeviceCommand, LoopCommand, TokenCommand},
     client::{PeerClient, PeerPairingClient},
@@ -616,7 +617,11 @@ fn print_status(status: &MpvStatus) {
 }
 
 fn print_history(history: &[HistoryEntry]) {
-    println!("{:<20}  {:<28}  SOURCE", "TIMESTAMP", "TITLE");
+    println!(
+        "{:<20}  {}  SOURCE",
+        "TIMESTAMP",
+        format_column("TITLE", 28)
+    );
     for entry in history {
         let timestamp = entry
             .display_played_at
@@ -625,9 +630,9 @@ fn print_history(history: &[HistoryEntry]) {
             .unwrap_or(entry.created_at.as_str());
         let title = entry.title.as_deref().unwrap_or("Unknown title");
         println!(
-            "{:<20}  {:<28}  {}",
+            "{:<20}  {}  {}",
             timestamp,
-            truncate(title, 28),
+            format_column(title, 28),
             entry.source_kind
         );
     }
@@ -741,15 +746,30 @@ fn shorten_source(source: &str) -> String {
         .collect()
 }
 
+fn format_column(value: &str, width: usize) -> String {
+    let mut value = truncate(value, width);
+    let padding = width.saturating_sub(UnicodeWidthStr::width(value.as_str()));
+    value.push_str(&" ".repeat(padding));
+    value
+}
+
 fn truncate(value: &str, width: usize) -> String {
-    if value.chars().count() <= width {
+    if UnicodeWidthStr::width(value) <= width {
         return value.to_string();
     }
     if width <= 3 {
         return ".".repeat(width);
     }
-    let prefix = value.chars().take(width - 3).collect::<String>();
-    format!("{prefix}...")
+
+    let prefix_width = width - 3;
+    let mut prefix_end = 0;
+    for (index, character) in value.char_indices() {
+        let end = index + character.len_utf8();
+        if UnicodeWidthStr::width(&value[..end]) <= prefix_width {
+            prefix_end = end;
+        }
+    }
+    format!("{}...", &value[..prefix_end])
 }
 
 fn init_daemon_logging() {
@@ -801,9 +821,18 @@ mod tests {
     }
 
     #[test]
-    fn truncate_counts_unicode_characters() {
-        assert_eq!(truncate("あいうえお", 4), "あ...");
-        assert_eq!(truncate("あいう", 3), "あいう");
+    fn truncate_uses_terminal_display_width() {
+        assert_eq!(truncate("abcあいう", 8), "abcあ...");
+        assert_eq!(truncate("あいう", 6), "あいう");
+        assert_eq!(truncate("e\u{301}fg", 3), "e\u{301}fg");
+    }
+
+    #[test]
+    fn format_column_pads_to_terminal_display_width() {
+        let column = format_column("あいうえお", 8);
+
+        assert_eq!(column, "あい... ");
+        assert_eq!(UnicodeWidthStr::width(column.as_str()), 8);
     }
 
     #[test]
