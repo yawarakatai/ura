@@ -1,6 +1,6 @@
 # Architecture
 
-Status: Current `0.4.0` behavior.
+Status: Current `0.5.0` behavior.
 
 `ura` is a small Linux audio node. Each machine can play audio itself and can
 route local commands to a paired peer. Nodes do not have fixed sending or

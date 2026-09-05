@@ -1,6 +1,6 @@
 # Development
 
-Status: Current `0.4.0` behavior.
+Status: Current `0.5.0` behavior.
 
 Use the project Nix flake for development and validation commands that need the
 expected toolchain or runtime tools.
