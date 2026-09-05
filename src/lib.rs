@@ -8,3 +8,5 @@ pub mod node;
 pub mod pairing;
 pub mod peer_api;
 pub mod selector;
+
+mod security;

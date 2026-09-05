@@ -266,7 +266,7 @@ impl Database {
             let id: i64 = row.get(0)?;
             let stored_hash: String = row.get(1)?;
             let last_seen_at: Option<String> = row.get(2)?;
-            if constant_time_eq(token_hash.as_bytes(), stored_hash.as_bytes()) {
+            if crate::security::constant_time_eq(token_hash.as_bytes(), stored_hash.as_bytes()) {
                 update_last_seen_if_stale(&conn, id, last_seen_at.as_deref())?;
                 return Ok(true);
             }
@@ -322,7 +322,7 @@ impl Database {
 }
 
 pub fn hash_token(token: &str) -> String {
-    hex_encode(&Sha256::digest(token.as_bytes()))
+    crate::security::hex_encode(&Sha256::digest(token.as_bytes()))
 }
 
 pub fn validate_client_name(name: &str) -> Result<()> {
@@ -358,26 +358,6 @@ fn update_last_seen_if_stale(conn: &Connection, id: i64, last_seen_at: Option<&s
         .with_context(|| "failed to update authorized client last_seen_at")?;
     }
     Ok(())
-}
-
-fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
-    if left.len() != right.len() {
-        return false;
-    }
-    left.iter()
-        .zip(right)
-        .fold(0_u8, |diff, (left, right)| diff | (left ^ right))
-        == 0
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut output = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        output.push(HEX[(byte >> 4) as usize] as char);
-        output.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    output
 }
 
 fn now_text() -> String {

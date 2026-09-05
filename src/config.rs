@@ -117,7 +117,7 @@ pub fn generate_token() -> Result<String> {
         fs::File::open("/dev/urandom").with_context(|| "failed to open /dev/urandom")?;
     std::io::Read::read_exact(&mut random, &mut bytes)
         .with_context(|| "failed to read random token bytes")?;
-    Ok(hex_encode(&bytes))
+    Ok(crate::security::hex_encode(&bytes))
 }
 
 pub fn normalize_peer_address(address: &str) -> Result<String> {
@@ -166,16 +166,6 @@ pub fn normalize_peer_address(address: &str) -> Result<String> {
 
 pub fn default_port() -> u16 {
     8765
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut output = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        output.push(HEX[(byte >> 4) as usize] as char);
-        output.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    output
 }
 
 fn load_file_config(path: Option<&Path>) -> Result<Option<FileConfig>> {

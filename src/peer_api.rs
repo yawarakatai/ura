@@ -710,7 +710,7 @@ fn authorize(headers: &HeaderMap, state: &AppState) -> std::result::Result<(), A
         return Ok(());
     }
 
-    if constant_time_eq(actual.as_bytes(), state.node_token.as_bytes()) {
+    if crate::security::constant_time_eq(actual.as_bytes(), state.node_token.as_bytes()) {
         Ok(())
     } else {
         warn!(reason = "invalid bearer token", "auth failure");
@@ -719,16 +719,6 @@ fn authorize(headers: &HeaderMap, state: &AppState) -> std::result::Result<(), A
             "invalid bearer token",
         ))
     }
-}
-
-fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
-    if left.len() != right.len() {
-        return false;
-    }
-    left.iter()
-        .zip(right)
-        .fold(0_u8, |diff, (left, right)| diff | (left ^ right))
-        == 0
 }
 
 pub fn validate_peer_token(token: &str) -> AnyhowResult<()> {
