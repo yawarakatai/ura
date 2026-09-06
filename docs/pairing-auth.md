@@ -1,6 +1,6 @@
 # Pairing And Authentication
 
-Status: Implemented for ura `0.5.0` using pairing protocol version 1.
+Status: Implemented for ura `0.6.0` using pairing protocol version 1.
 
 `ura` uses temporary six-digit pairing sessions to issue long-lived bearer
 credentials. The user-facing model is node/peer based, while protocol v1 is

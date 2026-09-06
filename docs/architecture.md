@@ -1,6 +1,6 @@
 # Architecture
 
-Status: Current `0.5.0` behavior.
+Status: Current `0.6.0` behavior.
 
 `ura` is a small Linux audio node. Each machine can play audio itself and can
 route local commands to a paired peer. Nodes do not have fixed sending or
@@ -83,9 +83,9 @@ ura --loop "https://youtu.be/..."
 ura toggle
 ura stop
 ura history
-ura history list
-ura history replay
-ura history replay 3
+ura history 3
+ura history 3 --queue
+ura history 3 --loop
 ura device list
 ura device select
 ura pair
@@ -102,10 +102,11 @@ Running `ura` without a URL or command shows status. Pause and resume are expose
 as one `ura toggle` operation. `ura --help` is the only help entry point; an
 additional `help` subcommand is not generated.
 
-`ura history` and `ura history list` show individual play events newest first
-with one-based entry numbers. `ura history replay <NUMBER>` submits the selected
-entry's original allowlisted URL as a normal, non-looping play command; omitting
-the number uses entry 1.
+`ura history` shows individual play events newest first with one-based entry
+numbers. `ura history <NUMBER>` submits the selected entry's original allowlisted
+URL as a normal play command. `--queue` adds that entry to the queue instead,
+while `--loop` starts it with current-track looping enabled. The options require
+an entry number and cannot be combined.
 
 Playback, status, and history require the running local node and always use its
 persisted selected device. The CLI has no one-shot destination override and no

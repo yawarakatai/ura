@@ -125,15 +125,17 @@ $ ura history
    2  2026-07-09 09:12:00   Another song                  url
 ```
 
-Replay an entry by number. Omitting the number replays the latest entry:
+Replay an entry by number, or apply the same queue and loop modifiers used for
+a URL:
 
 ```console
-$ ura history replay 2
-$ ura history replay
+$ ura history 2
+$ ura history 2 --queue
+$ ura history 2 --loop
 ```
 
-History and replay follow the same selected-device routing as other playback
-commands.
+`--queue` and `--loop` cannot be combined. History and replay follow the same
+selected-device routing as other playback commands.
 
 ## Node model
 

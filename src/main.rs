@@ -1,6 +1,7 @@
 use std::{
     io::{self, IsTerminal, Read, Write},
     net::Shutdown,
+    num::NonZeroUsize,
     os::unix::net::UnixStream,
     time::Duration,
 };
@@ -11,7 +12,7 @@ use serde::Deserialize;
 use unicode_width::UnicodeWidthStr;
 use ura::{
     admin_socket::{PairControlRequest, PairControlResponse},
-    cli::{Cli, Command, DeviceCommand, HistoryCommand},
+    cli::{Cli, Command, DeviceCommand},
     client::PeerPairingClient,
     config::{
         DeviceConfig, NodeConfig, default_control_socket_path, default_db_path,
@@ -48,7 +49,11 @@ async fn main() -> Result<()> {
             println!("stop: sent");
             Ok(())
         }
-        Some(Command::History { command }) => run_history_command(command),
+        Some(Command::History {
+            index,
+            queue,
+            loop_track,
+        }) => run_history_command(index, queue, loop_track),
         Some(Command::Device { command }) => run_device_command(command),
         Some(Command::Pair {
             address,
@@ -85,17 +90,23 @@ fn run_default(url: Option<String>, queue: bool, loop_track: bool) -> Result<()>
     Ok(())
 }
 
-fn run_history_command(command: Option<HistoryCommand>) -> Result<()> {
+fn run_history_command(index: Option<NonZeroUsize>, queue: bool, loop_track: bool) -> Result<()> {
     let client = NodeClient::new()?;
     let history = client.history()?;
-    match command {
-        None | Some(HistoryCommand::List) => print_history(&history),
-        Some(HistoryCommand::Replay { index }) => {
-            let entry = history_entry(&history, index.get())?;
-            let title = entry.title.as_deref().unwrap_or("Unknown title");
-            client.play(&entry.source_url)?;
-            println!("history replay #{}: sent {title}", index.get());
-        }
+    let Some(index) = index else {
+        print_history(&history);
+        return Ok(());
+    };
+
+    let index = index.get();
+    let entry = history_entry(&history, index)?;
+    let title = entry.title.as_deref().unwrap_or("Unknown title");
+    if queue {
+        client.queue(&entry.source_url)?;
+        println!("history #{index}: queued {title}");
+    } else {
+        client.play_with_loop(&entry.source_url, loop_track)?;
+        println!("history #{index}: sent {title}");
     }
     Ok(())
 }

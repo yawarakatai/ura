@@ -34,11 +34,24 @@ pub enum Command {
     Toggle,
     /// Stop playback on the selected device.
     Stop,
-    /// List playback history or replay an entry.
-    #[command(disable_help_subcommand = true)]
+    /// List playback history or replay an entry by number.
     History {
-        #[command(subcommand)]
-        command: Option<HistoryCommand>,
+        /// Latest-first history number to replay. Omit to list history.
+        #[arg(value_name = "NUMBER")]
+        index: Option<NonZeroUsize>,
+
+        /// Add the history entry to the playback queue.
+        #[arg(short, long, requires = "index", conflicts_with = "loop_track")]
+        queue: bool,
+
+        /// Loop the history entry until another URL is played.
+        #[arg(
+            short = 'l',
+            long = "loop",
+            requires = "index",
+            conflicts_with = "queue"
+        )]
+        loop_track: bool,
     },
     /// Choose and manage playback devices.
     #[command(disable_help_subcommand = true)]
@@ -71,17 +84,6 @@ pub enum Command {
         /// Address for the peer HTTP API to bind.
         #[arg(long)]
         bind: Option<SocketAddr>,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-pub enum HistoryCommand {
-    /// List playback history (the default).
-    List,
-    /// Replay an entry by its latest-first history number.
-    Replay {
-        #[arg(default_value = "1")]
-        index: NonZeroUsize,
     },
 }
 
@@ -147,9 +149,9 @@ mod tests {
             ["ura", "toggle"].as_slice(),
             ["ura", "stop"].as_slice(),
             ["ura", "history"].as_slice(),
-            ["ura", "history", "list"].as_slice(),
-            ["ura", "history", "replay"].as_slice(),
-            ["ura", "history", "replay", "3"].as_slice(),
+            ["ura", "history", "1"].as_slice(),
+            ["ura", "history", "3", "--queue"].as_slice(),
+            ["ura", "history", "--loop", "3"].as_slice(),
             ["ura", "pair"].as_slice(),
             ["ura", "pair", "192.168.1.23"].as_slice(),
             [
@@ -196,6 +198,12 @@ mod tests {
             .expect_err("queue and loop should conflict");
         Cli::try_parse_from(["ura", "--loop", "toggle"])
             .expect_err("root options should conflict with subcommands");
+        Cli::try_parse_from(["ura", "history", "--queue"])
+            .expect_err("history queue requires an entry number");
+        Cli::try_parse_from(["ura", "history", "--loop"])
+            .expect_err("history loop requires an entry number");
+        Cli::try_parse_from(["ura", "history", "1", "--queue", "--loop"])
+            .expect_err("history queue and loop should conflict");
     }
 
     #[test]
@@ -226,6 +234,8 @@ mod tests {
             ["ura", "--config", "/tmp/config.toml"].as_slice(),
             ["ura", "--peer-url", "http://127.0.0.1:8765"].as_slice(),
             ["ura", "--token", "secret"].as_slice(),
+            ["ura", "history", "list"].as_slice(),
+            ["ura", "history", "replay"].as_slice(),
             ["ura", "help"].as_slice(),
         ] {
             Cli::try_parse_from(args).expect_err("removed interface should be rejected");
@@ -259,20 +269,17 @@ mod tests {
     #[test]
     fn nested_help_subcommands_are_disabled() {
         let command = Cli::command();
-        for name in ["history", "device"] {
-            let nested = command.find_subcommand(name).expect("nested command");
-            assert!(
-                nested.find_subcommand("help").is_none(),
-                "{name} should use --help instead of a help subcommand"
-            );
-        }
+        let device = command.find_subcommand("device").expect("device command");
+        assert!(
+            device.find_subcommand("help").is_none(),
+            "device should use --help instead of a help subcommand"
+        );
     }
 
     #[test]
     fn history_replay_uses_one_based_indices() {
-        Cli::try_parse_from(["ura", "history", "replay", "1"])
-            .expect("positive history index should parse");
-        Cli::try_parse_from(["ura", "history", "replay", "0"])
+        Cli::try_parse_from(["ura", "history", "1"]).expect("positive history index should parse");
+        Cli::try_parse_from(["ura", "history", "0"])
             .expect_err("zero history index should be rejected");
     }
 }

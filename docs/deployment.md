@@ -1,6 +1,6 @@
 # Deployment
 
-Status: Current `0.5.0` behavior.
+Status: Current `0.6.0` behavior.
 
 This document covers running `ura daemon` as the long-lived local ura node.
 Tailscale or another private overlay can be used for peer traffic, but is not a
