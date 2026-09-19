@@ -32,19 +32,15 @@ pub const OBSERVE_METADATA: i64 = 3;
 pub const OBSERVE_PATH: i64 = 4;
 pub const OBSERVE_PAUSE: i64 = 5;
 pub const OBSERVE_IDLE_ACTIVE: i64 = 6;
-pub const OBSERVE_PLAYLIST_POS: i64 = 7;
-pub const OBSERVE_PLAYLIST_COUNT: i64 = 8;
-pub const OBSERVE_TIME_POS: i64 = 9;
+pub const OBSERVE_TIME_POS: i64 = 7;
 
-const OBSERVED_PROPERTIES: [(i64, &str); 9] = [
+const OBSERVED_PROPERTIES: [(i64, &str); 7] = [
     (OBSERVE_MEDIA_TITLE, "media-title"),
     (OBSERVE_DURATION, "duration"),
     (OBSERVE_METADATA, "metadata"),
     (OBSERVE_PATH, "path"),
     (OBSERVE_PAUSE, "pause"),
     (OBSERVE_IDLE_ACTIVE, "idle-active"),
-    (OBSERVE_PLAYLIST_POS, "playlist-pos"),
-    (OBSERVE_PLAYLIST_COUNT, "playlist-count"),
     (OBSERVE_TIME_POS, "time-pos"),
 ];
 
@@ -52,14 +48,12 @@ const OBSERVED_PROPERTIES: [(i64, &str); 9] = [
 pub enum LoopMode {
     Off,
     One,
-    Queue,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LoopStatus {
     Off,
     One,
-    Queue,
     Custom {
         loop_file: Option<String>,
         loop_playlist: Option<String>,
@@ -78,11 +72,11 @@ pub struct MpvStatus {
     pub album: Option<String>,
     pub duration_seconds: Option<f64>,
     pub position_seconds: Option<f64>,
-    pub playlist_pos: Option<i64>,
-    pub playlist_count: Option<i64>,
     pub source_url: Option<String>,
     pub playback_path: Option<String>,
     pub loop_status: Option<LoopStatus>,
+    #[serde(default)]
+    pub resume_available: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -102,6 +96,8 @@ struct PendingPlayback {
     source_url: String,
     play_url: String,
     source: Option<String>,
+    resume_position_seconds: Option<f64>,
+    record_history: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -116,19 +112,12 @@ pub struct ObservedPlaybackState {
     pub media_title: Option<String>,
     pub duration_seconds: Option<f64>,
     pub position_seconds: Option<f64>,
-    pub playlist_pos: Option<i64>,
-    pub playlist_count: Option<i64>,
     pub metadata: HashMap<String, String>,
     pub normalized_metadata: MediaMetadata,
+    last_checkpoint_position_seconds: Option<f64>,
 }
 
 pub type SharedPlaybackState = Arc<Mutex<ObservedPlaybackState>>;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum QueueMode {
-    Replace,
-    Append,
-}
 
 #[derive(Debug, Deserialize)]
 struct MpvResponse {
@@ -143,6 +132,7 @@ struct MpvEventMessage {
     id: Option<i64>,
     name: Option<String>,
     data: Option<Value>,
+    reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -153,8 +143,6 @@ pub struct MetadataSnapshot {
     path: Option<String>,
     pause: Option<bool>,
     idle_active: Option<bool>,
-    playlist_pos: Option<i64>,
-    playlist_count: Option<i64>,
     position_seconds: Option<f64>,
 }
 
@@ -173,13 +161,8 @@ impl MpvClient {
     }
 
     pub fn load_replace(&mut self, url: &str) -> Result<()> {
-        self.send_command(loadfile_command(url, LoadMode::Replace))?;
+        self.send_command(loadfile_command(url))?;
         self.set_pause(false)
-    }
-
-    pub fn load_enqueue(&mut self, url: &str) -> Result<()> {
-        self.send_command(loadfile_command(url, LoadMode::AppendPlay))?;
-        Ok(())
     }
 
     pub fn pause(&mut self) -> Result<()> {
@@ -190,13 +173,21 @@ impl MpvClient {
         self.set_pause(false)
     }
 
-    pub fn toggle(&mut self) -> Result<()> {
-        self.send_command(json!({ "command": ["cycle", "pause"] }))?;
+    pub fn stop(&mut self) -> Result<()> {
+        self.send_command(json!({ "command": ["stop"] }))?;
         Ok(())
     }
 
-    pub fn stop(&mut self) -> Result<()> {
-        self.send_command(json!({ "command": ["stop"] }))?;
+    pub fn seek(&mut self, seconds: f64, relative: bool) -> Result<()> {
+        if !seconds.is_finite() || (!relative && seconds < 0.0) {
+            bail!("seek position must be finite and absolute positions must be non-negative");
+        }
+        let mode = if relative {
+            "relative+exact"
+        } else {
+            "absolute+exact"
+        };
+        self.send_command(json!({ "command": ["seek", seconds, mode] }))?;
         Ok(())
     }
 
@@ -222,20 +213,8 @@ impl MpvClient {
             path: self.get_string_property("path")?,
             pause: self.get_bool_property("pause")?,
             idle_active: self.get_bool_property("idle-active")?,
-            playlist_pos: self.get_i64_property("playlist-pos")?,
-            playlist_count: self.get_i64_property("playlist-count")?,
             position_seconds: self.get_number_property("time-pos")?,
         })
-    }
-
-    pub fn control(&mut self, command: &str) -> Result<()> {
-        match command {
-            "toggle" => self.toggle(),
-            "stop" => self.stop(),
-            "pause" => self.pause(),
-            "resume" => self.resume(),
-            other => Err(UraError::UnsupportedControlCommand(other.to_string()).into()),
-        }
     }
 
     fn set_pause(&mut self, pause: bool) -> Result<()> {
@@ -292,19 +271,6 @@ impl MpvClient {
         };
         match response.data {
             Some(Value::Number(value)) => Ok(value.as_f64()),
-            Some(Value::Null) | None => Ok(None),
-            Some(value) => bail!(UraError::InvalidMpvResponse(value.to_string())),
-        }
-    }
-
-    fn get_i64_property(&mut self, name: &str) -> Result<Option<i64>> {
-        let response = match self.send_command(json!({ "command": ["get_property", name] })) {
-            Ok(response) => response,
-            Err(error) if is_property_unavailable(&error) => return Ok(None),
-            Err(error) => return Err(error),
-        };
-        match response.data {
-            Some(Value::Number(value)) => Ok(value.as_i64()),
             Some(Value::Null) | None => Ok(None),
             Some(value) => bail!(UraError::InvalidMpvResponse(value.to_string())),
         }
@@ -387,20 +353,22 @@ pub fn register_playback_request(
     source_url: String,
     play_url: String,
     source: Option<String>,
-    mode: QueueMode,
+    resume_position_seconds: Option<f64>,
+    record_history: bool,
 ) {
     let mut state = state.lock().expect("playback state lock poisoned");
-    if mode == QueueMode::Replace {
-        state.pending.clear();
-        state.current_source_url = None;
-        state.current_play_url = None;
-        state.current_source = None;
-        state.normalized_metadata = MediaMetadata::default();
-    }
+    state.pending.clear();
+    state.current_source_url = None;
+    state.current_play_url = None;
+    state.current_source = None;
+    state.normalized_metadata = MediaMetadata::default();
+    state.last_checkpoint_position_seconds = None;
     state.pending.push_back(PendingPlayback {
         source_url,
         play_url,
         source,
+        resume_position_seconds,
+        record_history,
     });
 }
 
@@ -428,31 +396,23 @@ pub fn observed_status(state: &SharedPlaybackState, loop_status: Option<LoopStat
         album: state.normalized_metadata.album.clone(),
         duration_seconds: state.duration_seconds,
         position_seconds: state.position_seconds,
-        playlist_pos: state.playlist_pos,
-        playlist_count: state.playlist_count,
         source_url: state.current_source_url.clone(),
         playback_path: state.current_play_url.clone(),
         loop_status,
+        resume_available: false,
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LoadMode {
-    Replace,
-    AppendPlay,
+pub fn current_playback_checkpoint(state: &SharedPlaybackState) -> Option<(String, f64)> {
+    let state = state.lock().expect("playback state lock poisoned");
+    let source_url = state.current_source_url.clone()?;
+    let position_seconds = state.position_seconds?;
+    (position_seconds.is_finite() && position_seconds >= 0.0)
+        .then_some((source_url, position_seconds))
 }
 
-impl LoadMode {
-    fn as_mpv_arg(self) -> &'static str {
-        match self {
-            Self::Replace => "replace",
-            Self::AppendPlay => "append-play",
-        }
-    }
-}
-
-fn loadfile_command(url: &str, mode: LoadMode) -> Value {
-    json!({ "command": ["loadfile", url, mode.as_mpv_arg()] })
+fn loadfile_command(url: &str) -> Value {
+    json!({ "command": ["loadfile", url, "replace"] })
 }
 
 fn set_property_command(name: &str, value: &str) -> Value {
@@ -463,7 +423,6 @@ fn loop_mode_properties(mode: LoopMode) -> [(&'static str, &'static str); 2] {
     match mode {
         LoopMode::Off => [("loop-file", "no"), ("loop-playlist", "no")],
         LoopMode::One => [("loop-file", "inf"), ("loop-playlist", "no")],
-        LoopMode::Queue => [("loop-file", "no"), ("loop-playlist", "inf")],
     }
 }
 
@@ -536,7 +495,9 @@ fn observe_events(
     // permanently omitted from history.
     match MpvClient::connect(socket_path).and_then(|mut client| client.metadata_snapshot()) {
         Ok(snapshot) if snapshot.idle_active != Some(true) && snapshot.path.is_some() => {
-            handle_file_loaded(snapshot, database, state)?;
+            if let Some(position) = handle_file_loaded(snapshot, database, state)? {
+                MpvClient::connect(socket_path)?.seek(position, false)?;
+            }
         }
         Ok(_) => {}
         Err(error) => warn!(error = %error, "failed to reconcile mpv state"),
@@ -576,8 +537,12 @@ fn handle_observer_line(
     let event: MpvEventMessage = serde_json::from_value(value)?;
     match event.event.as_deref() {
         Some("property-change") => {
+            let position_changed = is_position_change(&event);
             if handle_property_change(event, state) {
                 update_current_track_metadata(database, state)?;
+            }
+            if position_changed {
+                save_current_checkpoint_if_due(database, state)?;
             }
             Ok(())
         }
@@ -588,9 +553,25 @@ fn handle_observer_line(
                     warn!(error = %error, "metadata_missing");
                     MetadataSnapshot::default()
                 });
-            handle_file_loaded(snapshot, database, state)
+            if let Some(position) = handle_file_loaded(snapshot, database, state)? {
+                MpvClient::connect(socket_path)?.seek(position, false)?;
+            }
+            Ok(())
         }
         Some("end-file") => {
+            let loop_status = if event.reason.as_deref() == Some("eof") {
+                MpvClient::connect(socket_path)
+                    .and_then(|mut client| client.loop_status())
+                    .ok()
+            } else {
+                None
+            };
+            if should_preserve_looped_file(event.reason.as_deref(), loop_status.as_ref()) {
+                return Ok(());
+            }
+            if event.reason.as_deref() == Some("eof") {
+                database.clear_resume_checkpoint()?;
+            }
             handle_end_file(state);
             Ok(())
         }
@@ -599,12 +580,16 @@ fn handle_observer_line(
     }
 }
 
+fn should_preserve_looped_file(reason: Option<&str>, loop_status: Option<&LoopStatus>) -> bool {
+    reason == Some("eof") && loop_status == Some(&LoopStatus::One)
+}
+
 fn handle_file_loaded(
     snapshot: MetadataSnapshot,
     database: &Database,
     state: &SharedPlaybackState,
-) -> Result<()> {
-    let (pending, source_url, metadata) = {
+) -> Result<Option<f64>> {
+    let (pending, source_url, metadata, checkpoint_position, resume_position) = {
         let mut state = state.lock().expect("playback state lock poisoned");
         apply_snapshot(&mut state, snapshot);
         let pending = take_matching_pending(&mut state);
@@ -616,15 +601,28 @@ fn handle_file_loaded(
         let source_url = state.current_source_url.clone();
         refresh_normalized_metadata(&mut state);
         let metadata = state.normalized_metadata.clone();
-        (pending, source_url, metadata)
+        let resume_position = pending
+            .as_ref()
+            .and_then(|pending| pending.resume_position_seconds);
+        let checkpoint_position = resume_position.or(state.position_seconds).unwrap_or(0.0);
+        state.last_checkpoint_position_seconds = Some(checkpoint_position);
+        (
+            pending,
+            source_url,
+            metadata,
+            checkpoint_position,
+            resume_position,
+        )
     };
 
     let Some(source_url) = source_url else {
         debug!("metadata_missing");
-        return Ok(());
+        return Ok(None);
     };
 
-    if let Some(pending) = pending {
+    if let Some(pending) = pending
+        && pending.record_history
+    {
         if let Err(error) = database.record_play(
             &pending.source_url,
             &pending.play_url,
@@ -640,7 +638,8 @@ fn handle_file_loaded(
         debug!("media_loaded");
     }
     database.update_track_metadata(&source_url, &metadata)?;
-    Ok(())
+    database.save_resume_checkpoint(&source_url, checkpoint_position)?;
+    Ok(resume_position)
 }
 
 fn update_current_track_metadata(database: &Database, state: &SharedPlaybackState) -> Result<()> {
@@ -657,6 +656,37 @@ fn update_current_track_metadata(database: &Database, state: &SharedPlaybackStat
         debug!("metadata_updated");
     }
     Ok(())
+}
+
+fn is_position_change(event: &MpvEventMessage) -> bool {
+    event.name.as_deref() == Some("time-pos") || event.id == Some(OBSERVE_TIME_POS)
+}
+
+fn save_current_checkpoint_if_due(database: &Database, state: &SharedPlaybackState) -> Result<()> {
+    const CHECKPOINT_INTERVAL_SECONDS: f64 = 5.0;
+
+    let checkpoint = {
+        let mut state = state.lock().expect("playback state lock poisoned");
+        let Some(source_url) = state.current_source_url.clone() else {
+            return Ok(());
+        };
+        let Some(position) = state
+            .position_seconds
+            .filter(|position| position.is_finite() && *position >= 0.0)
+        else {
+            return Ok(());
+        };
+        let due = state
+            .last_checkpoint_position_seconds
+            .is_none_or(|last| (position - last).abs() >= CHECKPOINT_INTERVAL_SECONDS);
+        if !due {
+            return Ok(());
+        }
+        state.last_checkpoint_position_seconds = Some(position);
+        (source_url, position)
+    };
+
+    database.save_resume_checkpoint(&checkpoint.0, checkpoint.1)
 }
 
 fn handle_property_change(event: MpvEventMessage, state: &SharedPlaybackState) -> bool {
@@ -689,14 +719,6 @@ fn handle_property_change(event: MpvEventMessage, state: &SharedPlaybackState) -
             state.idle_active = bool_value(event.data);
             false
         }
-        Some("playlist-pos") | None if event.id == Some(OBSERVE_PLAYLIST_POS) => {
-            state.playlist_pos = i64_value(event.data);
-            false
-        }
-        Some("playlist-count") | None if event.id == Some(OBSERVE_PLAYLIST_COUNT) => {
-            state.playlist_count = i64_value(event.data);
-            false
-        }
         Some("time-pos") | None if event.id == Some(OBSERVE_TIME_POS) => {
             state.position_seconds = number_value(event.data);
             false
@@ -716,6 +738,7 @@ fn handle_end_file(state: &SharedPlaybackState) {
     state.media_title = None;
     state.duration_seconds = None;
     state.position_seconds = None;
+    state.last_checkpoint_position_seconds = None;
     state.metadata.clear();
     state.normalized_metadata = MediaMetadata::default();
 }
@@ -727,8 +750,6 @@ fn apply_snapshot(state: &mut ObservedPlaybackState, snapshot: MetadataSnapshot)
     state.path = snapshot.path;
     state.pause = snapshot.pause;
     state.idle_active = snapshot.idle_active;
-    state.playlist_pos = snapshot.playlist_pos;
-    state.playlist_count = snapshot.playlist_count;
     state.position_seconds = snapshot.position_seconds;
 }
 
@@ -867,13 +888,6 @@ fn number_value(value: Option<Value>) -> Option<f64> {
     }
 }
 
-fn i64_value(value: Option<Value>) -> Option<i64> {
-    match value {
-        Some(Value::Number(value)) => value.as_i64(),
-        _ => None,
-    }
-}
-
 fn bool_value(value: Option<Value>) -> Option<bool> {
     match value {
         Some(Value::Bool(value)) => Some(value),
@@ -884,7 +898,6 @@ fn bool_value(value: Option<Value>) -> Option<bool> {
 fn normalize_loop_status(loop_file: Option<String>, loop_playlist: Option<String>) -> LoopStatus {
     match (loop_file.as_deref(), loop_playlist.as_deref()) {
         (Some("inf"), _) => LoopStatus::One,
-        (_, Some("inf")) => LoopStatus::Queue,
         (Some("no"), Some("no")) => LoopStatus::Off,
         _ => LoopStatus::Custom {
             loop_file,
@@ -922,16 +935,8 @@ mod tests {
     #[test]
     fn builds_replace_loadfile_command() {
         assert_eq!(
-            loadfile_command("https://youtu.be/example", LoadMode::Replace),
+            loadfile_command("https://youtu.be/example"),
             json!({ "command": ["loadfile", "https://youtu.be/example", "replace"] })
-        );
-    }
-
-    #[test]
-    fn builds_enqueue_loadfile_command() {
-        assert_eq!(
-            loadfile_command("https://youtu.be/example", LoadMode::AppendPlay),
-            json!({ "command": ["loadfile", "https://youtu.be/example", "append-play"] })
         );
     }
 
@@ -958,17 +963,6 @@ mod tests {
     }
 
     #[test]
-    fn builds_loop_queue_commands() {
-        assert_eq!(
-            loop_mode_commands(LoopMode::Queue),
-            [
-                json!({ "command": ["set_property", "loop-file", "no"] }),
-                json!({ "command": ["set_property", "loop-playlist", "inf"] }),
-            ]
-        );
-    }
-
-    #[test]
     fn normalizes_loop_status() {
         assert_eq!(
             normalize_loop_status(Some("no".to_string()), Some("no".to_string())),
@@ -980,7 +974,10 @@ mod tests {
         );
         assert_eq!(
             normalize_loop_status(Some("no".to_string()), Some("inf".to_string())),
-            LoopStatus::Queue
+            LoopStatus::Custom {
+                loop_file: Some("no".to_string()),
+                loop_playlist: Some("inf".to_string()),
+            }
         );
         assert_eq!(
             normalize_loop_status(Some("2".to_string()), Some("no".to_string())),
@@ -989,6 +986,22 @@ mod tests {
                 loop_playlist: Some("no".to_string()),
             }
         );
+    }
+
+    #[test]
+    fn track_loop_preserves_state_at_end_of_file() {
+        assert!(should_preserve_looped_file(
+            Some("eof"),
+            Some(&LoopStatus::One)
+        ));
+        assert!(!should_preserve_looped_file(
+            Some("eof"),
+            Some(&LoopStatus::Off)
+        ));
+        assert!(!should_preserve_looped_file(
+            Some("stop"),
+            Some(&LoopStatus::One)
+        ));
     }
 
     #[test]
@@ -1017,13 +1030,6 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_control_command_is_clear() {
-        let error = UraError::UnsupportedControlCommand("next".to_string());
-
-        assert_eq!(error.to_string(), "unsupported control command `next`");
-    }
-
-    #[test]
     fn command_response_skips_async_events() {
         let socket_path = unique_socket_path("command-events");
         let listener = UnixListener::bind(&socket_path).expect("bind fake mpv socket");
@@ -1048,7 +1054,7 @@ mod tests {
 
         let mut client = MpvClient::connect(&socket_path).expect("connect fake mpv");
         client
-            .toggle()
+            .pause()
             .expect("event should not be parsed as response");
 
         handle.join().expect("join fake mpv");
@@ -1091,6 +1097,40 @@ mod tests {
             ]
         );
         let _ = fs::remove_file(socket_path);
+    }
+
+    #[test]
+    fn seek_sends_absolute_and_relative_commands() {
+        for (seconds, relative, expected_mode) in [
+            (90.0, false, "absolute+exact"),
+            (-10.0, true, "relative+exact"),
+        ] {
+            let socket_path = unique_socket_path("seek-command");
+            let listener = UnixListener::bind(&socket_path).expect("bind fake mpv socket");
+            let handle = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().expect("accept mpv client");
+                let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+                let mut request = String::new();
+                reader.read_line(&mut request).expect("read command");
+                let request: Value = serde_json::from_str(&request).expect("parse command");
+                let request_id = request
+                    .get("request_id")
+                    .and_then(Value::as_u64)
+                    .expect("request id");
+                writeln!(stream, r#"{{"request_id":{request_id},"error":"success"}}"#)
+                    .expect("write response");
+                request.get("command").cloned().expect("command")
+            });
+
+            let mut client = MpvClient::connect(&socket_path).expect("connect fake mpv");
+            client.seek(seconds, relative).expect("seek command");
+
+            assert_eq!(
+                handle.join().expect("join fake mpv"),
+                json!(["seek", seconds, expected_mode])
+            );
+            let _ = fs::remove_file(socket_path);
+        }
     }
 
     #[test]
@@ -1184,28 +1224,10 @@ mod tests {
             event_fixture(OBSERVE_PAUSE, "pause", Value::Bool(true)),
             &state,
         ));
-        assert!(!handle_property_change(
-            event_fixture(
-                OBSERVE_PLAYLIST_POS,
-                "playlist-pos",
-                Value::Number(serde_json::Number::from(1)),
-            ),
-            &state,
-        ));
-        assert!(!handle_property_change(
-            event_fixture(
-                OBSERVE_PLAYLIST_COUNT,
-                "playlist-count",
-                Value::Number(serde_json::Number::from(3)),
-            ),
-            &state,
-        ));
 
         let state = state.lock().expect("state lock");
         assert_eq!(state.position_seconds, Some(12.5));
         assert_eq!(state.pause, Some(true));
-        assert_eq!(state.playlist_pos, Some(1));
-        assert_eq!(state.playlist_count, Some(3));
     }
 
     #[test]
@@ -1279,8 +1301,8 @@ mod tests {
     }
 
     #[test]
-    fn file_loaded_records_matching_queued_track() {
-        let path = unique_db_path("queued-track");
+    fn latest_playback_request_replaces_an_earlier_pending_request() {
+        let path = unique_db_path("replaced-pending-track");
         let database = Database::open(path.clone()).expect("open database");
         let state = shared_playback_state();
         register_playback_request(
@@ -1288,14 +1310,16 @@ mod tests {
             "https://youtu.be/first".to_string(),
             "https://youtu.be/first".to_string(),
             Some("cli".to_string()),
-            QueueMode::Append,
+            None,
+            true,
         );
         register_playback_request(
             &state,
             "https://youtu.be/second".to_string(),
             "https://youtu.be/second".to_string(),
             Some("cli".to_string()),
-            QueueMode::Append,
+            None,
+            true,
         );
 
         handle_file_loaded(
@@ -1328,7 +1352,8 @@ mod tests {
             "https://youtu.be/example".to_string(),
             "https://youtu.be/example".to_string(),
             Some("cli".to_string()),
-            QueueMode::Replace,
+            None,
+            true,
         );
         let snapshot = MetadataSnapshot {
             path: Some("https://youtu.be/example".to_string()),
@@ -1354,7 +1379,8 @@ mod tests {
             "https://youtu.be/example".to_string(),
             "https://youtu.be/example".to_string(),
             Some("cli".to_string()),
-            QueueMode::Append,
+            None,
+            true,
         );
         handle_file_loaded(
             MetadataSnapshot {
@@ -1379,6 +1405,150 @@ mod tests {
         assert_eq!(history[0].play_count, 1);
         assert_eq!(history[0].title.as_deref(), Some("Example song"));
         assert_eq!(history[0].uploader.as_deref(), Some("Example artist"));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn resumed_load_seeks_without_adding_another_history_entry() {
+        let path = unique_db_path("resumed-load");
+        let database = Database::open(path.clone()).expect("open database");
+        let state = shared_playback_state();
+        register_playback_request(
+            &state,
+            "https://youtu.be/example".to_string(),
+            "https://youtu.be/example".to_string(),
+            Some("cli".to_string()),
+            None,
+            true,
+        );
+        handle_file_loaded(
+            MetadataSnapshot {
+                path: Some("https://youtu.be/example".to_string()),
+                position_seconds: Some(0.0),
+                ..MetadataSnapshot::default()
+            },
+            &database,
+            &state,
+        )
+        .expect("initial load");
+        handle_end_file(&state);
+
+        register_playback_request(
+            &state,
+            "https://youtu.be/example".to_string(),
+            "https://youtu.be/example".to_string(),
+            Some("resume".to_string()),
+            Some(42.5),
+            false,
+        );
+        let resume_position = handle_file_loaded(
+            MetadataSnapshot {
+                path: Some("https://youtu.be/example".to_string()),
+                position_seconds: Some(0.0),
+                ..MetadataSnapshot::default()
+            },
+            &database,
+            &state,
+        )
+        .expect("resumed load");
+
+        assert_eq!(resume_position, Some(42.5));
+        assert_eq!(database.history().expect("history").len(), 1);
+        assert_eq!(
+            database
+                .resume_checkpoint()
+                .expect("checkpoint")
+                .expect("saved checkpoint")
+                .position_seconds,
+            42.5
+        );
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn playback_position_is_checkpointed_periodically() {
+        let path = unique_db_path("periodic-checkpoint");
+        let database = Database::open(path.clone()).expect("open database");
+        let state = shared_playback_state();
+        register_playback_request(
+            &state,
+            "https://youtu.be/example".to_string(),
+            "https://youtu.be/example".to_string(),
+            Some("cli".to_string()),
+            None,
+            true,
+        );
+        handle_file_loaded(
+            MetadataSnapshot {
+                path: Some("https://youtu.be/example".to_string()),
+                position_seconds: Some(0.0),
+                ..MetadataSnapshot::default()
+            },
+            &database,
+            &state,
+        )
+        .expect("load track");
+
+        for position in [3.0, 6.0, 8.0, 12.0] {
+            handle_observer_line(
+                &format!(
+                    r#"{{"event":"property-change","id":{OBSERVE_TIME_POS},"name":"time-pos","data":{position}}}"#
+                ),
+                Path::new("/tmp/missing.sock"),
+                &database,
+                &state,
+            )
+            .expect("handle position event");
+        }
+
+        assert_eq!(
+            database
+                .resume_checkpoint()
+                .expect("checkpoint")
+                .expect("saved checkpoint")
+                .position_seconds,
+            12.0
+        );
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn natural_end_clears_checkpoint_but_manual_stop_preserves_it() {
+        let path = unique_db_path("end-checkpoint");
+        let database = Database::open(path.clone()).expect("open database");
+        let state = shared_playback_state();
+        database
+            .save_resume_checkpoint("https://youtu.be/example", 42.0)
+            .expect("save checkpoint");
+
+        handle_observer_line(
+            r#"{"event":"end-file","reason":"stop"}"#,
+            Path::new("/tmp/missing.sock"),
+            &database,
+            &state,
+        )
+        .expect("handle manual stop");
+        assert!(
+            database
+                .resume_checkpoint()
+                .expect("checkpoint after stop")
+                .is_some()
+        );
+
+        handle_observer_line(
+            r#"{"event":"end-file","reason":"eof"}"#,
+            Path::new("/tmp/missing.sock"),
+            &database,
+            &state,
+        )
+        .expect("handle natural end");
+        assert_eq!(
+            database.resume_checkpoint().expect("checkpoint after end"),
+            None
+        );
 
         let _ = fs::remove_file(path);
     }
@@ -1447,6 +1617,7 @@ mod tests {
             id: Some(id),
             name: Some(name.to_string()),
             data: Some(data),
+            reason: None,
         }
     }
 

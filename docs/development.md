@@ -1,6 +1,6 @@
 # Development
 
-Status: Current `0.6.0` behavior.
+Status: Current `0.7.0` behavior.
 
 Use the project Nix flake for development and validation commands that need the
 expected toolchain or runtime tools.
@@ -52,8 +52,11 @@ nix develop
 cargo run -- device list
 cargo run -- "https://youtu.be/..."
 cargo run --
-cargo run -- toggle
+cargo run -- pause
+cargo run -- resume
+cargo run -- seek +10
 cargo run -- stop
+cargo run -- resume
 ```
 
 With no peer selected, `device list` should show this device as selected and the
@@ -125,7 +128,9 @@ a controlled mpv wrapper. Verify `file-loaded`, `media-title`, `duration`, and
 YouTube metadata smoke tests are manual because they depend on network/upstream
 behavior. Confirm playback starts, then check bare `ura` status and `ura
 history` show useful metadata and never print literal `null` for missing
-display values.
+display values. Pause and resume should continue immediately, relative and
+absolute seek should update the displayed position, and stop followed by resume
+should reload the same URL near its saved position.
 
 ## Logging
 

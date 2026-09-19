@@ -95,15 +95,8 @@ impl PeerClient {
         )
     }
 
-    pub fn queue(&self, url: &str) -> Result<()> {
-        self.post_json(
-            "/v1/enqueue",
-            &PlayRequest {
-                url,
-                source: "cli",
-                loop_track: false,
-            },
-        )
+    pub fn seek(&self, seconds: f64, relative: bool) -> Result<()> {
+        self.post_json("/v1/seek", &SeekRequest { seconds, relative })
     }
 
     pub fn control(&self, command: &str) -> Result<()> {
@@ -175,6 +168,12 @@ struct PlayRequest<'a> {
     source: &'a str,
     #[serde(rename = "loop")]
     loop_track: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct SeekRequest {
+    seconds: f64,
+    relative: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -330,24 +329,19 @@ mod tests {
     }
 
     #[test]
-    fn queue_uses_append_http_api() {
-        let request = capture_request(r#"{"ok":true}"#, |client| {
-            client.queue("https://youtu.be/example")
-        });
+    fn seek_uses_http_api() {
+        let request = capture_request(r#"{"ok":true}"#, |client| client.seek(-10.0, true));
 
-        assert_request_line(&request, "POST /v1/enqueue HTTP/1.1");
+        assert_request_line(&request, "POST /v1/seek HTTP/1.1");
         assert_authorization_header(&request);
-        assert!(request.contains(r#""url":"https://youtu.be/example""#));
-        assert!(request.contains(r#""source":"cli""#));
-        assert!(request.contains(r#""loop":false"#));
+        assert!(request.contains(r#""seconds":-10.0"#));
+        assert!(request.contains(r#""relative":true"#));
     }
 
     #[test]
     fn control_commands_use_http_api() {
-        for command in ["toggle", "stop", "loop-off", "loop-one", "loop-queue"] {
-            let request = capture_request(r#"{"ok":true,"loop_status":null}"#, |client| {
-                client.control(command)
-            });
+        for command in ["pause", "resume", "stop"] {
+            let request = capture_request(r#"{"ok":true}"#, |client| client.control(command));
 
             assert_request_line(&request, "POST /v1/control HTTP/1.1");
             assert_authorization_header(&request);

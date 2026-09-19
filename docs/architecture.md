@@ -1,6 +1,6 @@
 # Architecture
 
-Status: Current `0.6.0` behavior.
+Status: Current `0.7.0` behavior.
 
 `ura` is a small Linux audio node. Each machine can play audio itself and can
 route local commands to a paired peer. Nodes do not have fixed sending or
@@ -78,13 +78,15 @@ The same binary uses a URL-first CLI with a small command set:
 ```bash
 ura                                # status
 ura "https://youtu.be/..."         # play now
-ura --queue "https://youtu.be/..."
 ura --loop "https://youtu.be/..."
-ura toggle
+ura pause
+ura resume
 ura stop
+ura seek +30
+ura seek -10
+ura seek 12:30
 ura history
 ura history 3
-ura history 3 --queue
 ura history 3 --loop
 ura device list
 ura device select
@@ -93,20 +95,27 @@ ura pair 192.168.1.23
 ura daemon
 ```
 
-A bare URL plays immediately. `--queue` appends it instead, while `--loop`
-starts it with current-track looping enabled. Queue and loop options cannot be
-combined. A normal play request disables an earlier track loop, so looping does
-not leak into later playback.
+A bare URL plays immediately, while `--loop` starts it with current-track
+looping enabled. A normal play request disables an earlier track loop, so
+looping does not leak into later playback.
 
-Running `ura` without a URL or command shows status. Pause and resume are exposed
-as one `ura toggle` operation. `ura --help` is the only help entry point; an
-additional `help` subcommand is not generated.
+Running `ura` without a URL or command shows status. `ura pause` is idempotent
+and keeps the media loaded. `ura resume` resumes paused media immediately, or
+reloads stopped media from its persisted checkpoint. `ura stop` preserves that
+checkpoint before unloading the media. A naturally completed track clears its
+checkpoint. Explicit pause/resume commands replace the former toggle operation.
+
+`ura seek` accepts an absolute `SS`, `MM:SS`, or `HH:MM:SS` position. A leading
+`+` or `-` makes it relative to the current position. Seeking requires an active
+track and also works while paused.
+
+`ura --help` is the only help entry point; an additional `help` subcommand is not
+generated.
 
 `ura history` shows individual play events newest first with one-based entry
 numbers. `ura history <NUMBER>` submits the selected entry's original allowlisted
-URL as a normal play command. `--queue` adds that entry to the queue instead,
-while `--loop` starts it with current-track looping enabled. The options require
-an entry number and cannot be combined.
+URL as a normal play command, while `--loop` starts it with current-track looping
+enabled. Resuming a stopped track does not create another history event.
 
 Playback, status, and history require the running local node and always use its
 persisted selected device. The CLI has no one-shot destination override and no
@@ -125,7 +134,7 @@ $XDG_RUNTIME_DIR/ura/node.sock
 ```
 
 The socket is created under the user's restrictive XDG runtime directory and is
-mode `0600`. Requests are small JSON messages for play, queue, control, status,
+mode `0600`. Requests are small JSON messages for play, seek, control, status,
 history, device listing, and device selection.
 
 The node socket is the authoritative local routing boundary. A request arriving
@@ -141,11 +150,15 @@ Authenticated routes are:
 
 ```text
 POST /v1/play
-POST /v1/enqueue
+POST /v1/seek
 POST /v1/control
 GET  /v1/status
 GET  /v1/history
 ```
+
+`POST /v1/control` accepts the explicit `pause`, `resume`, and `stop` actions.
+`POST /v1/seek` accepts finite `seconds` and `relative` fields. Resume and seek
+terminate at the receiving node like all other peer playback operations.
 
 Pairing routes are available without bearer authentication only while a pairing
 session is active:
@@ -206,11 +219,12 @@ through a shell.
 
 The local playback backend keeps a persistent JSON IPC observer connection and
 observes structured properties including media title, duration, metadata, path,
-pause, idle state, playlist position/count, and playback position.
+pause, idle state, and playback position.
 
-On `file-loaded`, ura associates the loaded item with a pending play or queue
-request and records the successful play. The observer also reconciles mpv's
-current structured-property snapshot when it connects, so a load completed
+On `file-loaded`, ura associates the loaded item with a pending play or resume
+request. New plays are recorded in history; resume requests retain the existing
+history event and seek after the file has loaded. The observer also reconciles
+mpv's current structured-property snapshot when it connects, so a load completed
 during observer startup or reconnection is not omitted. Later property changes
 can enrich the same current-track metadata. Human-readable mpv logs are not
 parsed for runtime state.
@@ -227,12 +241,19 @@ fallback: ~/.local/share/ura/ura.db
 Playback history uses `tracks` and `plays` tables. History is returned as
 individual play events in reverse chronological order, including repeated plays
 of the same URL. CLI history numbers are derived from that order and are not
-stored identifiers. Authorized local/peer clients
-are stored in the existing `authorized_devices` table using SHA-256 token hashes,
-creation time, coarse `last_seen_at`, and optional revocation time. The table
-name is retained as an on-disk schema compatibility detail; the Rust API calls
-these records authorized clients. Plaintext issued tokens are not stored by the
-node that authorizes them.
+stored identifiers.
+
+The singleton `resume_checkpoint` table stores the current source URL and latest
+playback position. The observer updates it at five-second playback intervals and
+file loads; pause and stop also save immediately. Manual stop and node shutdown
+preserve it, while natural end clears it. Track display metadata is joined from
+the existing `tracks` table.
+
+Authorized local/peer clients are stored in the existing `authorized_devices`
+table using SHA-256 token hashes, creation time, coarse `last_seen_at`, and
+optional revocation time. The table name is retained as an on-disk schema
+compatibility detail; the Rust API calls these records authorized clients.
+Plaintext issued tokens are not stored by the node that authorizes them.
 
 ## XDG Paths
 

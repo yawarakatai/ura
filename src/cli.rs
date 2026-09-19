@@ -16,12 +16,8 @@ pub struct Cli {
     #[arg(value_name = "URL", value_parser = parse_url)]
     pub url: Option<String>,
 
-    /// Add URL to the playback queue instead of playing it immediately.
-    #[arg(short, long, requires = "url", conflicts_with = "loop_track")]
-    pub queue: bool,
-
     /// Loop URL until another URL is played.
-    #[arg(short = 'l', long = "loop", requires = "url", conflicts_with = "queue")]
+    #[arg(short = 'l', long = "loop", requires = "url")]
     pub loop_track: bool,
 
     #[command(subcommand)]
@@ -30,27 +26,26 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Toggle pause/resume on the selected device.
-    Toggle,
-    /// Stop playback on the selected device.
+    /// Pause playback on the selected device.
+    Pause,
+    /// Resume paused or stopped playback on the selected device.
+    Resume,
+    /// Stop playback while preserving its resume position.
     Stop,
+    /// Seek to a position or move relative to the current position.
+    Seek {
+        /// Absolute time (12:30) or relative offset (+30, -10).
+        #[arg(value_name = "POSITION", allow_hyphen_values = true, value_parser = parse_seek_target)]
+        target: SeekTarget,
+    },
     /// List playback history or replay an entry by number.
     History {
         /// Latest-first history number to replay. Omit to list history.
         #[arg(value_name = "NUMBER")]
         index: Option<NonZeroUsize>,
 
-        /// Add the history entry to the playback queue.
-        #[arg(short, long, requires = "index", conflicts_with = "loop_track")]
-        queue: bool,
-
         /// Loop the history entry until another URL is played.
-        #[arg(
-            short = 'l',
-            long = "loop",
-            requires = "index",
-            conflicts_with = "queue"
-        )]
+        #[arg(short = 'l', long = "loop", requires = "index")]
         loop_track: bool,
     },
     /// Choose and manage playback devices.
@@ -87,6 +82,12 @@ pub enum Command {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SeekTarget {
+    pub seconds: f64,
+    pub relative: bool,
+}
+
 #[derive(Debug, Subcommand)]
 pub enum DeviceCommand {
     /// List this device, configured peers, and authorized clients.
@@ -106,6 +107,42 @@ pub enum DeviceCommand {
     Authorize { name: String },
     /// Revoke a client credential on this node.
     Revoke { name: String },
+}
+
+fn parse_seek_target(value: &str) -> Result<SeekTarget, String> {
+    let value = value.trim();
+    let (relative, sign, duration) = match value.as_bytes().first() {
+        Some(b'+') => (true, 1.0, &value[1..]),
+        Some(b'-') => (true, -1.0, &value[1..]),
+        _ => (false, 1.0, value),
+    };
+    if duration.is_empty() {
+        return Err("expected a time such as 12:30, +30, or -10".to_string());
+    }
+
+    let parts = duration.split(':').collect::<Vec<_>>();
+    if parts.len() > 3 || parts.iter().any(|part| part.is_empty()) {
+        return Err("expected SS, MM:SS, or HH:MM:SS".to_string());
+    }
+
+    let mut seconds = 0.0;
+    for (index, part) in parts.iter().enumerate() {
+        let component = part
+            .parse::<f64>()
+            .map_err(|_| "time components must be numbers".to_string())?;
+        if !component.is_finite() || component < 0.0 {
+            return Err("time components must be finite and non-negative".to_string());
+        }
+        if index > 0 && component >= 60.0 {
+            return Err("minutes and seconds must be less than 60".to_string());
+        }
+        seconds = seconds * 60.0 + component;
+    }
+
+    Ok(SeekTarget {
+        seconds: seconds * sign,
+        relative,
+    })
 }
 
 fn parse_url(value: &str) -> Result<String, String> {
@@ -133,12 +170,8 @@ mod tests {
         Cli::try_parse_from(["ura"]).expect("bare command should show status");
         Cli::try_parse_from(["ura", "https://youtu.be/example"])
             .expect("URL should play immediately");
-        Cli::try_parse_from(["ura", "--queue", "https://youtu.be/example"])
-            .expect("queue option should parse");
         Cli::try_parse_from(["ura", "https://youtu.be/example", "--loop"])
             .expect("loop option should parse");
-        Cli::try_parse_from(["ura", "-q", "https://youtu.be/example"])
-            .expect("short queue option should parse");
         Cli::try_parse_from(["ura", "-l", "https://youtu.be/example"])
             .expect("short loop option should parse");
     }
@@ -146,11 +179,14 @@ mod tests {
     #[test]
     fn parses_structured_commands() {
         for args in [
-            ["ura", "toggle"].as_slice(),
+            ["ura", "pause"].as_slice(),
+            ["ura", "resume"].as_slice(),
             ["ura", "stop"].as_slice(),
+            ["ura", "seek", "+30"].as_slice(),
+            ["ura", "seek", "-10"].as_slice(),
+            ["ura", "seek", "12:30"].as_slice(),
             ["ura", "history"].as_slice(),
             ["ura", "history", "1"].as_slice(),
-            ["ura", "history", "3", "--queue"].as_slice(),
             ["ura", "history", "--loop", "3"].as_slice(),
             ["ura", "pair"].as_slice(),
             ["ura", "pair", "192.168.1.23"].as_slice(),
@@ -192,18 +228,46 @@ mod tests {
 
     #[test]
     fn rejects_ambiguous_or_incomplete_url_options() {
-        Cli::try_parse_from(["ura", "--queue"]).expect_err("queue requires a URL");
         Cli::try_parse_from(["ura", "--loop"]).expect_err("loop requires a URL");
-        Cli::try_parse_from(["ura", "--queue", "--loop", "https://youtu.be/example"])
-            .expect_err("queue and loop should conflict");
-        Cli::try_parse_from(["ura", "--loop", "toggle"])
+        Cli::try_parse_from(["ura", "--loop", "pause"])
             .expect_err("root options should conflict with subcommands");
-        Cli::try_parse_from(["ura", "history", "--queue"])
-            .expect_err("history queue requires an entry number");
         Cli::try_parse_from(["ura", "history", "--loop"])
             .expect_err("history loop requires an entry number");
-        Cli::try_parse_from(["ura", "history", "1", "--queue", "--loop"])
-            .expect_err("history queue and loop should conflict");
+    }
+
+    #[test]
+    fn parses_absolute_and_relative_seek_targets() {
+        assert_eq!(
+            parse_seek_target("12:30").expect("absolute seek"),
+            SeekTarget {
+                seconds: 750.0,
+                relative: false,
+            }
+        );
+        assert_eq!(
+            parse_seek_target("+1:30").expect("forward seek"),
+            SeekTarget {
+                seconds: 90.0,
+                relative: true,
+            }
+        );
+        assert_eq!(
+            parse_seek_target("-10").expect("backward seek"),
+            SeekTarget {
+                seconds: -10.0,
+                relative: true,
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_seek_targets() {
+        for value in ["", "+", "1:60", "1:2:60", "1:2:3:4", "nan"] {
+            assert!(
+                parse_seek_target(value).is_err(),
+                "seek target should be rejected: {value}"
+            );
+        }
     }
 
     #[test]
@@ -223,8 +287,9 @@ mod tests {
         for args in [
             ["ura", "play", "https://youtu.be/example"].as_slice(),
             ["ura", "queue", "https://youtu.be/example"].as_slice(),
-            ["ura", "pause"].as_slice(),
-            ["ura", "resume"].as_slice(),
+            ["ura", "--queue", "https://youtu.be/example"].as_slice(),
+            ["ura", "history", "1", "--queue"].as_slice(),
+            ["ura", "toggle"].as_slice(),
             ["ura", "status"].as_slice(),
             ["ura", "loop", "track"].as_slice(),
             ["ura", "playback", "status"].as_slice(),
@@ -252,7 +317,9 @@ mod tests {
 
         assert_eq!(
             subcommands,
-            ["toggle", "stop", "history", "device", "pair", "daemon"]
+            [
+                "pause", "resume", "stop", "seek", "history", "device", "pair", "daemon"
+            ]
         );
 
         let mut command = Cli::command();
@@ -260,7 +327,7 @@ mod tests {
         command.write_long_help(&mut help).expect("write help");
         let help = String::from_utf8(help).expect("help should be UTF-8");
         assert!(help.contains("ura [OPTIONS] [URL]"));
-        assert!(help.contains("--queue"));
+        assert!(!help.contains("--queue"));
         assert!(help.contains("--loop"));
         assert!(!help.contains("  help"));
         assert!(!help.contains("\n  playback"));

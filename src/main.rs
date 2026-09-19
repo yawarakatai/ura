@@ -32,16 +32,20 @@ use ura::{
 async fn main() -> Result<()> {
     let Cli {
         url,
-        queue,
         loop_track,
         command,
     } = Cli::parse();
 
     match command {
-        None => run_default(url, queue, loop_track),
-        Some(Command::Toggle) => {
-            NodeClient::new()?.control("toggle")?;
-            println!("toggle: sent");
+        None => run_default(url, loop_track),
+        Some(Command::Pause) => {
+            NodeClient::new()?.control("pause")?;
+            println!("pause: sent");
+            Ok(())
+        }
+        Some(Command::Resume) => {
+            NodeClient::new()?.control("resume")?;
+            println!("resume: sent");
             Ok(())
         }
         Some(Command::Stop) => {
@@ -49,11 +53,12 @@ async fn main() -> Result<()> {
             println!("stop: sent");
             Ok(())
         }
-        Some(Command::History {
-            index,
-            queue,
-            loop_track,
-        }) => run_history_command(index, queue, loop_track),
+        Some(Command::Seek { target }) => {
+            NodeClient::new()?.seek(target.seconds, target.relative)?;
+            println!("seek: sent");
+            Ok(())
+        }
+        Some(Command::History { index, loop_track }) => run_history_command(index, loop_track),
         Some(Command::Device { command }) => run_device_command(command),
         Some(Command::Pair {
             address,
@@ -74,13 +79,9 @@ async fn main() -> Result<()> {
     }
 }
 
-fn run_default(url: Option<String>, queue: bool, loop_track: bool) -> Result<()> {
+fn run_default(url: Option<String>, loop_track: bool) -> Result<()> {
     let client = NodeClient::new()?;
     match url {
-        Some(url) if queue => {
-            client.queue(&url)?;
-            println!("queue: sent {url}");
-        }
         Some(url) => {
             client.play_with_loop(&url, loop_track)?;
             println!("play: sent {url}");
@@ -90,7 +91,7 @@ fn run_default(url: Option<String>, queue: bool, loop_track: bool) -> Result<()>
     Ok(())
 }
 
-fn run_history_command(index: Option<NonZeroUsize>, queue: bool, loop_track: bool) -> Result<()> {
+fn run_history_command(index: Option<NonZeroUsize>, loop_track: bool) -> Result<()> {
     let client = NodeClient::new()?;
     let history = client.history()?;
     let Some(index) = index else {
@@ -101,13 +102,8 @@ fn run_history_command(index: Option<NonZeroUsize>, queue: bool, loop_track: boo
     let index = index.get();
     let entry = history_entry(&history, index)?;
     let title = entry.title.as_deref().unwrap_or("Unknown title");
-    if queue {
-        client.queue(&entry.source_url)?;
-        println!("history #{index}: queued {title}");
-    } else {
-        client.play_with_loop(&entry.source_url, loop_track)?;
-        println!("history #{index}: sent {title}");
-    }
+    client.play_with_loop(&entry.source_url, loop_track)?;
+    println!("history #{index}: sent {title}");
     Ok(())
 }
 
@@ -417,8 +413,85 @@ where
     serde_json::from_str(&response).with_context(|| "failed to parse pairing response")
 }
 
+const STATUS_PROGRESS_WIDTH: usize = 32;
+
 fn print_status(status: &MpvStatus) {
-    if (status.idle_active.unwrap_or(false)
+    let color = io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none();
+    print!("{}", render_status(status, color));
+}
+
+fn render_status(status: &MpvStatus, color: bool) -> String {
+    if status.resume_available {
+        return render_stopped_status(status, color);
+    }
+    if status_is_idle(status) {
+        return format!("{}\n", styled("■ IDLE", "2", color));
+    }
+
+    let paused = status.pause.unwrap_or(false);
+    let state = if paused { "Ⅱ PAUSED" } else { "▶ PLAYING" };
+    let state_style = if paused { "1;33" } else { "1;32" };
+    let mut output = format!("{}\n\n", styled(state, state_style, color));
+    append_track_heading(&mut output, status, color);
+
+    let position = format_position(status.position_seconds);
+    let duration = format_duration(status.duration_seconds);
+    if let Some(progress) = playback_progress(status.position_seconds, status.duration_seconds) {
+        let percentage = (progress * 100.0).round() as u8;
+        output.push_str(&format!(
+            "{}  {position} / {duration}  {percentage}%\n",
+            render_progress_bar(progress, color)
+        ));
+    } else {
+        output.push_str(&format!("Time  {position} / {duration}\n"));
+    }
+
+    if let Some(loop_status) = &status.loop_status {
+        output.push('\n');
+        output.push_str(&format!("Loop {}\n", format_loop_status(loop_status)));
+    }
+
+    if status.title.is_none()
+        && status.media_title.is_none()
+        && let Some(source_url) = &status.source_url
+    {
+        if status.loop_status.is_none() {
+            output.push('\n');
+        }
+        output.push_str(&format!("Source {}\n", shorten_source(source_url)));
+    }
+
+    output
+}
+
+fn render_stopped_status(status: &MpvStatus, color: bool) -> String {
+    let mut output = format!("{}\n\n", styled("■ STOPPED", "1", color));
+    append_track_heading(&mut output, status, color);
+    output.push_str(&format!(
+        "Saved at {} / {}\n\n",
+        format_position(status.position_seconds),
+        format_duration(status.duration_seconds)
+    ));
+    output.push_str("Run `ura resume` to continue\n");
+    output
+}
+
+fn append_track_heading(output: &mut String, status: &MpvStatus, color: bool) {
+    output.push_str(&styled(&display_title(status), "1", color));
+    output.push('\n');
+
+    let artist = status.artist.as_deref().or(status.uploader.as_deref());
+    match (artist, status.album.as_deref()) {
+        (Some(artist), Some(album)) => output.push_str(&format!("{artist}  ·  Album {album}\n")),
+        (Some(artist), None) => output.push_str(&format!("{artist}\n")),
+        (None, Some(album)) => output.push_str(&format!("Album {album}\n")),
+        (None, None) => {}
+    }
+    output.push('\n');
+}
+
+fn status_is_idle(status: &MpvStatus) -> bool {
+    (status.idle_active.unwrap_or(false)
         || (status.pause.is_none()
             && status.path.is_none()
             && status.source_url.is_none()
@@ -426,39 +499,30 @@ fn print_status(status: &MpvStatus) {
             && status.media_title.is_none()))
         && status.title.is_none()
         && status.media_title.is_none()
-    {
-        println!("idle");
-        return;
-    }
+}
 
-    println!(
-        "{}",
-        if status.pause.unwrap_or(false) {
-            "paused"
-        } else {
-            "playing"
-        }
-    );
-    println!("title:   {}", display_title(status));
-    if let Some(artist) = status.artist.as_deref().or(status.uploader.as_deref()) {
-        println!("artist:  {artist}");
+fn playback_progress(position: Option<f64>, duration: Option<f64>) -> Option<f64> {
+    let (Some(position), Some(duration)) = (position, duration) else {
+        return None;
+    };
+    if !position.is_finite() || position < 0.0 || !duration.is_finite() || duration <= 0.0 {
+        return None;
     }
-    println!(
-        "time:    {} / {}",
-        format_position(status.position_seconds),
-        format_duration(status.duration_seconds)
-    );
-    if let (Some(position), Some(count)) = (status.playlist_pos, status.playlist_count) {
-        println!("queue:   {} / {}", position + 1, count);
-    }
-    if let Some(loop_status) = &status.loop_status {
-        println!("loop:    {}", format_loop_status(loop_status));
-    }
-    if status.title.is_none()
-        && status.media_title.is_none()
-        && let Some(source_url) = &status.source_url
-    {
-        println!("source:  {}", shorten_source(source_url));
+    Some((position / duration).clamp(0.0, 1.0))
+}
+
+fn render_progress_bar(progress: f64, color: bool) -> String {
+    let marker = (progress * (STATUS_PROGRESS_WIDTH - 1) as f64).round() as usize;
+    let elapsed = format!("{}●", "━".repeat(marker));
+    let remaining = "─".repeat(STATUS_PROGRESS_WIDTH - marker - 1);
+    format!("{}{remaining}", styled(&elapsed, "36", color))
+}
+
+fn styled(value: &str, style: &str, enabled: bool) -> String {
+    if enabled {
+        format!("\x1b[{style}m{value}\x1b[0m")
+    } else {
+        value.to_string()
     }
 }
 
@@ -584,7 +648,6 @@ fn format_loop_status(status: &LoopStatus) -> &'static str {
     match status {
         LoopStatus::Off => "off",
         LoopStatus::One => "track",
-        LoopStatus::Queue => "queue",
         LoopStatus::Custom { .. } => "custom",
     }
 }
@@ -651,6 +714,25 @@ mod tests {
         }
     }
 
+    fn status_fixture() -> MpvStatus {
+        MpvStatus {
+            pause: Some(false),
+            idle_active: Some(false),
+            path: Some("https://example.test/playback".to_string()),
+            media_title: Some("Example song".to_string()),
+            title: Some("Example song".to_string()),
+            artist: Some("Example artist".to_string()),
+            uploader: None,
+            album: Some("Example album".to_string()),
+            duration_seconds: Some(2687.0),
+            position_seconds: Some(905.0),
+            source_url: Some("https://youtu.be/example".to_string()),
+            playback_path: Some("https://example.test/playback".to_string()),
+            loop_status: Some(LoopStatus::One),
+            resume_available: false,
+        }
+    }
+
     #[test]
     fn history_entries_use_latest_first_one_based_numbers() {
         let history = vec![
@@ -689,24 +771,78 @@ mod tests {
     #[test]
     fn status_title_uses_unknown_instead_of_source_url() {
         let status = MpvStatus {
-            pause: Some(false),
-            idle_active: Some(false),
-            path: None,
             media_title: Some("https://youtu.be/example".to_string()),
             title: None,
-            artist: None,
-            uploader: None,
-            album: None,
-            duration_seconds: None,
-            position_seconds: None,
-            playlist_pos: None,
-            playlist_count: None,
             source_url: Some("https://youtu.be/example".to_string()),
-            playback_path: None,
-            loop_status: Some(LoopStatus::Off),
+            ..status_fixture()
         };
 
         assert_eq!(display_title(&status), "Unknown title");
+    }
+
+    #[test]
+    fn status_rendering_highlights_metadata_and_progress() {
+        let output = render_status(&status_fixture(), false);
+
+        assert!(
+            output.starts_with(
+                "▶ PLAYING\n\nExample song\nExample artist  ·  Album Example album\n\n"
+            )
+        );
+        let progress_line = output
+            .lines()
+            .find(|line| line.contains("15:05 / 44:47"))
+            .expect("status should contain a progress line");
+        let progress_bar = progress_line
+            .split_once("  ")
+            .map(|(bar, _)| bar)
+            .expect("progress bar should be separated from the time");
+        assert_eq!(UnicodeWidthStr::width(progress_bar), STATUS_PROGRESS_WIDTH);
+        assert!(progress_line.ends_with("15:05 / 44:47  34%"));
+        assert!(output.contains("Loop track\n"));
+        assert!(!output.contains("\x1b["));
+    }
+
+    #[test]
+    fn status_rendering_falls_back_when_progress_is_unknown() {
+        let status = MpvStatus {
+            pause: Some(true),
+            duration_seconds: None,
+            position_seconds: Some(15.0),
+            ..status_fixture()
+        };
+
+        let output = render_status(&status, false);
+
+        assert!(output.starts_with("Ⅱ PAUSED\n\n"));
+        assert!(output.contains("Time  0:15 / unknown\n"));
+        assert!(!output.contains('●'));
+    }
+
+    #[test]
+    fn stopped_status_shows_the_saved_resume_position() {
+        let status = MpvStatus {
+            pause: None,
+            idle_active: Some(true),
+            path: None,
+            position_seconds: Some(905.0),
+            resume_available: true,
+            loop_status: None,
+            ..status_fixture()
+        };
+
+        let output = render_status(&status, false);
+
+        assert!(output.starts_with("■ STOPPED\n\nExample song\n"));
+        assert!(output.contains("Saved at 15:05 / 44:47\n"));
+        assert!(output.ends_with("Run `ura resume` to continue\n"));
+        assert!(!output.contains('●'));
+    }
+
+    #[test]
+    fn styled_status_uses_ansi_only_when_enabled() {
+        assert_eq!(styled("value", "1", false), "value");
+        assert_eq!(styled("value", "1", true), "\x1b[1mvalue\x1b[0m");
     }
 
     #[test]

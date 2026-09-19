@@ -32,6 +32,15 @@ pub struct HistoryEntry {
     pub play_count: i64,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResumeCheckpoint {
+    pub source_url: String,
+    pub position_seconds: f64,
+    pub title: Option<String>,
+    pub uploader: Option<String>,
+    pub duration_seconds: Option<f64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthorizedClient {
     pub name: String,
@@ -206,6 +215,62 @@ impl Database {
             .with_context(|| "failed to read playback history")
     }
 
+    pub fn save_resume_checkpoint(&self, source_url: &str, position_seconds: f64) -> Result<()> {
+        if source_url.trim().is_empty() {
+            anyhow::bail!("resume checkpoint source URL must not be empty");
+        }
+        if !position_seconds.is_finite() || position_seconds < 0.0 {
+            anyhow::bail!("resume checkpoint position must be finite and non-negative");
+        }
+
+        let conn = self.connect()?;
+        conn.execute(
+            "INSERT INTO resume_checkpoint (id, source_url, position_seconds, updated_at)
+             VALUES (1, ?1, ?2, ?3)
+             ON CONFLICT(id) DO UPDATE SET
+                 source_url = excluded.source_url,
+                 position_seconds = excluded.position_seconds,
+                 updated_at = excluded.updated_at",
+            params![source_url, position_seconds, now_text()],
+        )
+        .with_context(|| "failed to save resume checkpoint")?;
+        Ok(())
+    }
+
+    pub fn resume_checkpoint(&self) -> Result<Option<ResumeCheckpoint>> {
+        let conn = self.connect()?;
+        conn.query_row(
+            "SELECT
+                resume_checkpoint.source_url,
+                resume_checkpoint.position_seconds,
+                tracks.title,
+                tracks.uploader,
+                tracks.duration
+             FROM resume_checkpoint
+             LEFT JOIN tracks ON tracks.source_url = resume_checkpoint.source_url
+             WHERE resume_checkpoint.id = 1",
+            [],
+            |row| {
+                Ok(ResumeCheckpoint {
+                    source_url: row.get(0)?,
+                    position_seconds: row.get(1)?,
+                    title: row.get(2)?,
+                    uploader: row.get(3)?,
+                    duration_seconds: row.get::<_, Option<i64>>(4)?.map(|value| value as f64),
+                })
+            },
+        )
+        .optional()
+        .with_context(|| "failed to read resume checkpoint")
+    }
+
+    pub fn clear_resume_checkpoint(&self) -> Result<()> {
+        let conn = self.connect()?;
+        conn.execute("DELETE FROM resume_checkpoint WHERE id = 1", [])
+            .with_context(|| "failed to clear resume checkpoint")?;
+        Ok(())
+    }
+
     pub fn authorize_client(&self, name: &str, token: &str) -> Result<()> {
         validate_client_name(name)?;
         let token_hash = hash_token(token);
@@ -297,6 +362,13 @@ impl Database {
                 played_at TEXT NOT NULL,
                 source TEXT,
                 FOREIGN KEY(track_id) REFERENCES tracks(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS resume_checkpoint (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                source_url TEXT NOT NULL,
+                position_seconds REAL NOT NULL,
+                updated_at TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS authorized_devices (
@@ -579,6 +651,82 @@ mod tests {
             !database
                 .update_track_metadata("https://youtu.be/example", &metadata)
                 .expect("second update")
+        );
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn resume_checkpoint_persists_position_and_track_metadata() {
+        let path = unique_db_path("resume-checkpoint");
+        let database = Database::open(path.clone()).expect("open database");
+        database
+            .record_play(
+                "https://youtu.be/example",
+                "https://youtu.be/example",
+                Some("cli"),
+            )
+            .expect("record play");
+        database
+            .update_track_metadata(
+                "https://youtu.be/example",
+                &MediaMetadata {
+                    title: Some("Example song".to_string()),
+                    uploader: Some("Example artist".to_string()),
+                    duration_seconds: Some(222.5),
+                    ..MediaMetadata::default()
+                },
+            )
+            .expect("update metadata");
+
+        database
+            .save_resume_checkpoint("https://youtu.be/example", 42.5)
+            .expect("save checkpoint");
+        let checkpoint = database
+            .resume_checkpoint()
+            .expect("read checkpoint")
+            .expect("checkpoint should exist");
+
+        assert_eq!(checkpoint.source_url, "https://youtu.be/example");
+        assert_eq!(checkpoint.position_seconds, 42.5);
+        assert_eq!(checkpoint.title.as_deref(), Some("Example song"));
+        assert_eq!(checkpoint.uploader.as_deref(), Some("Example artist"));
+        assert_eq!(checkpoint.duration_seconds, Some(223.0));
+
+        database
+            .save_resume_checkpoint("https://youtu.be/example", 84.0)
+            .expect("replace checkpoint");
+        assert_eq!(
+            database
+                .resume_checkpoint()
+                .expect("read replaced checkpoint")
+                .expect("checkpoint should exist")
+                .position_seconds,
+            84.0
+        );
+
+        database
+            .clear_resume_checkpoint()
+            .expect("clear checkpoint");
+        assert_eq!(database.resume_checkpoint().expect("read empty"), None);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn resume_checkpoint_rejects_invalid_positions() {
+        let path = unique_db_path("invalid-resume-checkpoint");
+        let database = Database::open(path.clone()).expect("open database");
+
+        assert!(
+            database
+                .save_resume_checkpoint("https://youtu.be/example", -1.0)
+                .is_err()
+        );
+        assert!(
+            database
+                .save_resume_checkpoint("https://youtu.be/example", f64::NAN)
+                .is_err()
         );
 
         let _ = fs::remove_file(path);

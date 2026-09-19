@@ -35,8 +35,8 @@ Sometimes you just want the machine in front of you to play the music.
 With `ura`, all of those are the same operation: select a playback device.
 
 - Play YouTube and YouTube Music URLs on this device or a paired Linux peer
-- Play immediately, loop one track, or add tracks to the queue
-- Toggle pause/resume, stop, inspect status, and replay earlier tracks through the same selected device
+- Play immediately or loop one track
+- Pause, resume, stop, seek, inspect status, and replay earlier tracks through the same selected device
 - Pair peers with a temporary six-digit code
 - Switch devices with an interactive terminal selector
 - Keep `mpv` and its IPC interface local to each node
@@ -99,7 +99,8 @@ The selection persists, so playback commands do not need a destination argument:
 
 ```console
 $ ura "https://youtu.be/..."
-$ ura toggle
+$ ura pause
+$ ura resume
 $ ura
 ```
 
@@ -107,12 +108,57 @@ A bare URL plays immediately. URL options modify that request, while commands
 are reserved for independent actions and management:
 
 ```console
-$ ura --queue "https://youtu.be/..."
 $ ura --loop "https://youtu.be/..."
+$ ura seek +30
 $ ura stop
+$ ura resume
 ```
 
-Running `ura` without a URL or command shows the selected device's status.
+Running `ura` without a URL or command shows the selected device's status:
+
+```console
+$ ura
+▶ PLAYING
+
+breakcore mix for the insane
+RockCherry
+
+━━━━━━━━━━●─────────────────────  15:05 / 44:47  34%
+
+Loop track
+```
+
+The progress display is a snapshot. Run `ura` again to refresh it. Status colors
+are enabled on terminals and disabled when output is redirected or `NO_COLOR`
+is set. Streams and tracks without a known duration use a plain time display
+instead of a progress bar.
+
+## Pause, stop, resume, and seek
+
+Pause keeps the current media loaded and resumes immediately:
+
+```console
+$ ura pause
+$ ura resume
+```
+
+Stop unloads the current media but preserves its latest playback position.
+Running `ura resume` while stopped reloads the original URL and seeks to that
+position. Resume positions are checkpointed during playback and are preserved
+across node restarts. A track that reaches its natural end is not resumable.
+Resuming a stopped track continues the existing play and does not add another
+history entry.
+
+Seek arguments without a sign are absolute positions. A leading `+` or `-`
+means a relative movement:
+
+```console
+$ ura seek 12:30
+$ ura seek +30
+$ ura seek -10
+```
+
+Seeking requires active playback and also works while paused.
 
 ## Replay from history
 
@@ -125,17 +171,15 @@ $ ura history
    2  2026-07-09 09:12:00   Another song                  url
 ```
 
-Replay an entry by number, or apply the same queue and loop modifiers used for
-a URL:
+Replay an entry by number, optionally with track looping:
 
 ```console
 $ ura history 2
-$ ura history 2 --queue
 $ ura history 2 --loop
 ```
 
-`--queue` and `--loop` cannot be combined. History and replay follow the same
-selected-device routing as other playback commands.
+History and replay follow the same selected-device routing as other playback
+commands.
 
 ## Node model
 

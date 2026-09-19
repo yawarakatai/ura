@@ -4,7 +4,6 @@ use std::{error::Error, fmt};
 pub enum UraError {
     MissingHome,
     MissingRuntimeDir,
-    UnsupportedControlCommand(String),
     MpvCommandFailed(String),
     InvalidMpvResponse(String),
 }
@@ -18,9 +17,6 @@ impl fmt::Display for UraError {
                     f,
                     "XDG_RUNTIME_DIR is not set; cannot locate mpv IPC socket"
                 )
-            }
-            Self::UnsupportedControlCommand(command) => {
-                write!(f, "unsupported control command `{command}`")
             }
             Self::MpvCommandFailed(error) => write!(f, "mpv command failed: {error}"),
             Self::InvalidMpvResponse(response) => {

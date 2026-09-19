@@ -66,8 +66,9 @@ enum NodeRequest {
         #[serde(default)]
         loop_track: bool,
     },
-    Queue {
-        url: String,
+    Seek {
+        seconds: f64,
+        relative: bool,
     },
     Control {
         action: String,
@@ -126,10 +127,8 @@ impl NodeClient {
         })
     }
 
-    pub fn queue(&self, url: &str) -> Result<()> {
-        self.expect_ok(NodeRequest::Queue {
-            url: url.to_string(),
-        })
+    pub fn seek(&self, seconds: f64, relative: bool) -> Result<()> {
+        self.expect_ok(NodeRequest::Seek { seconds, relative })
     }
 
     pub fn control(&self, action: &str) -> Result<()> {
@@ -334,8 +333,8 @@ async fn dispatch(request: NodeRequest, runtime: &NodeRuntime) -> Result<NodeRes
             .await?;
             Ok(NodeResponse::Ok)
         }
-        NodeRequest::Queue { url } => {
-            route(runtime, move |client| client.queue(&url)).await?;
+        NodeRequest::Seek { seconds, relative } => {
+            route(runtime, move |client| client.seek(seconds, relative)).await?;
             Ok(NodeResponse::Ok)
         }
         NodeRequest::Control { action } => {

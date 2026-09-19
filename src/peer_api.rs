@@ -18,10 +18,10 @@ use crate::admin_socket::run_control_socket;
 use crate::config::{
     default_control_socket_path, default_db_path, default_device_name, default_mpv_socket_path,
 };
-use crate::db::{Database, HistoryEntry, authorize_client};
+use crate::db::{Database, HistoryEntry, ResumeCheckpoint, authorize_client};
 use crate::media_url;
 use crate::mpv::{
-    LoopMode, LoopStatus, MpvClient, MpvEventObserver, QueueMode, SharedPlaybackState,
+    LoopMode, MpvClient, MpvEventObserver, SharedPlaybackState, current_playback_checkpoint,
     observed_status, register_playback_request, rollback_playback_request, shared_playback_state,
 };
 use crate::pairing::{ClaimDecision, PairingManager, PairingStatus};
@@ -164,7 +164,7 @@ fn app(state: AppState) -> Router {
     let auth_state = state.clone();
     Router::new()
         .route("/v1/play", post(play))
-        .route("/v1/enqueue", post(enqueue))
+        .route("/v1/seek", post(seek))
         .route("/v1/control", post(control))
         .route("/v1/status", get(status))
         .route("/v1/history", get(history))
@@ -192,6 +192,12 @@ struct PlayRequest {
 }
 
 #[derive(Debug, Deserialize)]
+struct SeekRequest {
+    seconds: f64,
+    relative: bool,
+}
+
+#[derive(Debug, Deserialize)]
 struct ControlRequest {
     command: String,
 }
@@ -199,12 +205,6 @@ struct ControlRequest {
 #[derive(Debug, Serialize)]
 struct OkResponse {
     ok: bool,
-}
-
-#[derive(Debug, Serialize)]
-struct ControlResponse {
-    ok: bool,
-    loop_status: Option<LoopStatus>,
 }
 
 #[derive(Debug, Serialize)]
@@ -279,7 +279,8 @@ async fn play(
         source_url.clone(),
         play_url.clone(),
         source.clone(),
-        QueueMode::Replace,
+        None,
+        true,
     );
 
     let result = run_mpv_command(state.clone(), {
@@ -297,71 +298,174 @@ async fn play(
     Ok(Json(OkResponse { ok: true }))
 }
 
-async fn enqueue(
+async fn seek(
     State(state): State<AppState>,
-    Json(request): Json<PlayRequest>,
+    Json(request): Json<SeekRequest>,
 ) -> std::result::Result<Json<OkResponse>, AppError> {
-    info!(request_type = "enqueue", "HTTP request");
-    let play_url = validate_supported_url(&request.url)?;
-    let source_url = request.url;
-    let source = request.source;
-    register_playback_request(
-        &state.playback_state,
-        source_url.clone(),
-        play_url.clone(),
-        source.clone(),
-        QueueMode::Append,
+    info!(
+        request_type = "seek",
+        relative = request.relative,
+        "HTTP request"
     );
-
-    let result = run_mpv_command(state.clone(), {
-        let play_url = play_url.clone();
-        move |client| client.load_enqueue(&play_url)
-    })
-    .await;
-    if result.is_err() {
-        rollback_playback_request(&state.playback_state, &play_url);
+    if !request.seconds.is_finite() || (!request.relative && request.seconds < 0.0) {
+        return Err(AppError::new(
+            StatusCode::BAD_REQUEST,
+            "seek position must be finite and absolute positions must be non-negative",
+        ));
     }
-    result?;
+    if !has_active_playback(&state.playback_state) {
+        return Err(AppError::new(
+            StatusCode::BAD_REQUEST,
+            "nothing is playing; run `ura resume` first",
+        ));
+    }
+
+    let checkpoint = seek_checkpoint(&state.playback_state, request.seconds, request.relative);
+    run_mpv_command(state.clone(), move |client| {
+        client.seek(request.seconds, request.relative)
+    })
+    .await?;
+    if let Some((source_url, position_seconds)) = checkpoint {
+        run_db_command(state, move |database| {
+            database.save_resume_checkpoint(&source_url, position_seconds)
+        })
+        .await?;
+    }
     Ok(Json(OkResponse { ok: true }))
+}
+
+fn seek_checkpoint(
+    state: &SharedPlaybackState,
+    seconds: f64,
+    relative: bool,
+) -> Option<(String, f64)> {
+    let status = observed_status(state, None);
+    let source_url = status.source_url?;
+    let position = if relative {
+        status.position_seconds? + seconds
+    } else {
+        seconds
+    };
+    let position = position.max(0.0);
+    let position = status
+        .duration_seconds
+        .filter(|duration| duration.is_finite() && *duration > 0.0)
+        .map_or(position, |duration| position.min(duration));
+    Some((source_url, position))
 }
 
 async fn control(
     State(state): State<AppState>,
     Json(request): Json<ControlRequest>,
-) -> std::result::Result<Json<ControlResponse>, AppError> {
+) -> std::result::Result<Json<OkResponse>, AppError> {
     let command = request.command;
     info!(request_type = "control", command = %command, "HTTP request");
 
-    let loop_status = match command.as_str() {
-        "toggle" | "stop" | "pause" | "resume" => {
-            run_mpv_command(state, move |client| client.control(&command)).await?;
-            None
-        }
-        "loop-off" => {
-            run_mpv_command(state, |client| client.set_loop_mode(LoopMode::Off)).await?;
-            None
-        }
-        "loop-one" => {
-            run_mpv_command(state, |client| client.set_loop_mode(LoopMode::One)).await?;
-            None
-        }
-        "loop-queue" => {
-            run_mpv_command(state, |client| client.set_loop_mode(LoopMode::Queue)).await?;
-            None
-        }
-        "loop-status" => Some(run_mpv_command(state, |client| client.loop_status()).await?),
+    match command.as_str() {
+        "pause" => pause_playback(state).await?,
+        "resume" => resume_playback(state).await?,
+        "stop" => stop_playback(state).await?,
         other => {
             return Err(AppError::new(
                 StatusCode::BAD_REQUEST,
                 format!("unsupported control command `{other}`"),
             ));
         }
-    };
+    }
 
-    Ok(Json(ControlResponse {
-        ok: true,
-        loop_status,
-    }))
+    Ok(Json(OkResponse { ok: true }))
+}
+
+async fn pause_playback(state: AppState) -> std::result::Result<(), AppError> {
+    let status = observed_status(&state.playback_state, None);
+    if !status_has_active_playback(&status) || status.pause == Some(true) {
+        return Ok(());
+    }
+
+    save_current_checkpoint(&state).await?;
+    run_mpv_command(state, |client| client.pause()).await
+}
+
+async fn stop_playback(state: AppState) -> std::result::Result<(), AppError> {
+    if !has_active_playback(&state.playback_state) {
+        return Ok(());
+    }
+
+    save_current_checkpoint(&state).await?;
+    run_mpv_command(state, |client| client.stop()).await
+}
+
+async fn resume_playback(state: AppState) -> std::result::Result<(), AppError> {
+    let status = observed_status(&state.playback_state, None);
+    if status_has_active_playback(&status) {
+        if status.pause == Some(true) {
+            run_mpv_command(state, |client| client.resume()).await?;
+        }
+        return Ok(());
+    }
+
+    let checkpoint = run_db_command(state.clone(), |database| database.resume_checkpoint())
+        .await?
+        .ok_or_else(|| AppError::new(StatusCode::BAD_REQUEST, "nothing to resume"))?;
+    let play_url = validate_supported_url(&checkpoint.source_url)?;
+    register_playback_request(
+        &state.playback_state,
+        checkpoint.source_url,
+        play_url.clone(),
+        Some("resume".to_string()),
+        Some(checkpoint.position_seconds),
+        false,
+    );
+
+    let result = run_mpv_command(state.clone(), {
+        let play_url = play_url.clone();
+        move |client| {
+            client.set_loop_mode(LoopMode::Off)?;
+            client.load_replace(&play_url)
+        }
+    })
+    .await;
+    if result.is_err() {
+        rollback_playback_request(&state.playback_state, &play_url);
+    }
+    result
+}
+
+async fn save_current_checkpoint(state: &AppState) -> std::result::Result<(), AppError> {
+    let Some((source_url, position_seconds)) = current_playback_checkpoint(&state.playback_state)
+    else {
+        return Ok(());
+    };
+    run_db_command(state.clone(), move |database| {
+        database.save_resume_checkpoint(&source_url, position_seconds)
+    })
+    .await
+}
+
+fn has_active_playback(state: &SharedPlaybackState) -> bool {
+    status_has_active_playback(&observed_status(state, None))
+}
+
+fn status_has_active_playback(status: &crate::mpv::MpvStatus) -> bool {
+    status.idle_active != Some(true)
+        && (status.path.is_some() || status.source_url.is_some() || status.media_title.is_some())
+}
+
+fn apply_resume_checkpoint(status: &mut crate::mpv::MpvStatus, checkpoint: ResumeCheckpoint) {
+    status.pause = None;
+    status.idle_active = Some(true);
+    status.path = None;
+    status.media_title = checkpoint.title.clone();
+    status.title = checkpoint.title;
+    status.artist = None;
+    status.uploader = checkpoint.uploader;
+    status.album = None;
+    status.duration_seconds = checkpoint.duration_seconds;
+    status.position_seconds = Some(checkpoint.position_seconds);
+    status.source_url = Some(checkpoint.source_url);
+    status.playback_path = None;
+    status.loop_status = None;
+    status.resume_available = true;
 }
 
 async fn status(
@@ -371,7 +475,13 @@ async fn status(
     let loop_status = run_mpv_command(state.clone(), |client| client.loop_status())
         .await
         .ok();
-    let status = observed_status(&state.playback_state, loop_status);
+    let mut status = observed_status(&state.playback_state, loop_status);
+    if !status_has_active_playback(&status)
+        && let Some(checkpoint) =
+            run_db_command(state, |database| database.resume_checkpoint()).await?
+    {
+        apply_resume_checkpoint(&mut status, checkpoint);
+    }
     Ok(Json(status))
 }
 
@@ -647,6 +757,100 @@ mod tests {
     }
 
     #[test]
+    fn seek_checkpoint_tracks_relative_and_clamped_positions() {
+        let state = shared_playback_state();
+        {
+            let mut state = state.lock().expect("state lock");
+            state.current_source_url = Some("https://youtu.be/example".to_string());
+            state.position_seconds = Some(40.0);
+            state.duration_seconds = Some(60.0);
+        }
+
+        assert_eq!(
+            seek_checkpoint(&state, 10.0, true),
+            Some(("https://youtu.be/example".to_string(), 50.0))
+        );
+        assert_eq!(
+            seek_checkpoint(&state, -100.0, true),
+            Some(("https://youtu.be/example".to_string(), 0.0))
+        );
+        assert_eq!(
+            seek_checkpoint(&state, 90.0, false),
+            Some(("https://youtu.be/example".to_string(), 60.0))
+        );
+    }
+
+    #[tokio::test]
+    async fn seek_rejects_idle_playback_without_contacting_mpv() {
+        let (state, db_path) = test_state();
+
+        let error = seek(
+            State(state),
+            Json(SeekRequest {
+                seconds: 30.0,
+                relative: true,
+            }),
+        )
+        .await
+        .expect_err("idle seek should fail");
+
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert!(error.message.contains("nothing is playing"));
+        let _ = fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn resume_rejects_when_no_checkpoint_exists() {
+        let (state, db_path) = test_state();
+
+        let error = resume_playback(state)
+            .await
+            .expect_err("missing checkpoint should fail");
+
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(error.message, "nothing to resume");
+        let _ = fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn status_exposes_a_saved_resume_checkpoint() {
+        let (state, db_path) = test_state();
+        state
+            .database
+            .record_play(
+                "https://youtu.be/example",
+                "https://youtu.be/example",
+                Some("cli"),
+            )
+            .expect("record play");
+        state
+            .database
+            .update_track_metadata(
+                "https://youtu.be/example",
+                &crate::mpv::MediaMetadata {
+                    title: Some("Example song".to_string()),
+                    uploader: Some("Example artist".to_string()),
+                    duration_seconds: Some(300.0),
+                    ..crate::mpv::MediaMetadata::default()
+                },
+            )
+            .expect("update metadata");
+        state
+            .database
+            .save_resume_checkpoint("https://youtu.be/example", 42.0)
+            .expect("save checkpoint");
+
+        let Json(status) = status(State(state)).await.expect("read status");
+
+        assert!(status.resume_available);
+        assert_eq!(status.title.as_deref(), Some("Example song"));
+        assert_eq!(status.uploader.as_deref(), Some("Example artist"));
+        assert_eq!(status.position_seconds, Some(42.0));
+        assert_eq!(status.duration_seconds, Some(300.0));
+        let _ = fs::remove_file(db_path);
+    }
+
+    #[test]
     fn builds_audio_only_mpv_startup_args() {
         let socket_path = Path::new("/run/user/1000/ura/mpv.sock");
 
@@ -787,7 +991,7 @@ mod tests {
 
         for request in [
             "POST /v1/play HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-            "POST /v1/enqueue HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            "POST /v1/seek HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
             "POST /v1/control HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
             "GET /v1/status HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
             "GET /v1/history HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
