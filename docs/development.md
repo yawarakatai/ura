@@ -132,6 +132,15 @@ display values. Pause and resume should continue immediately, relative and
 absolute seek should update the displayed position, and stop followed by resume
 should reload the same URL near its saved position.
 
+Check status immediately after requesting a URL: it should show `LOADING`
+until mpv finishes loading, without displaying a URL fragment as a song title.
+Verify stop cancels a pending load. With a controlled mpv wrapper, emit
+`end-file` with `reason=error` and a `file_error`, then verify `ERROR` and the
+reason appear in status and a `playback failed` warning appears in daemon logs.
+An older resume checkpoint must not hide the error; failed loads must not enter
+history. Retry with a valid source and confirm the error clears. Unit tests also
+cover observer reconciliation during loading and missing failure details.
+
 ## Logging
 
 `ura daemon` initializes tracing with `RUST_LOG` support and defaults to

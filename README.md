@@ -133,6 +133,13 @@ are enabled on terminals and disabled when output is redirected or `NO_COLOR`
 is set. Streams and tracks without a known duration use a plain time display
 instead of a progress bar.
 
+`play: sent` confirms that mpv accepted the request, not that the track has
+finished loading. While resolving the URL and opening the media, status shows
+`LOADING` rather than `PLAYING`. If mpv fails to load or play the track, status
+shows `ERROR` with mpv's failure reason and the source URL. The failure is also
+logged by the daemon and is not hidden by an older saved resume position. A new
+play or resume load clears the previous error.
+
 ## Pause, stop, resume, and seek
 
 Pause keeps the current media loaded and resumes immediately:

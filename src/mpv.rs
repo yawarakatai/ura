@@ -77,6 +77,10 @@ pub struct MpvStatus {
     pub loop_status: Option<LoopStatus>,
     #[serde(default)]
     pub resume_available: bool,
+    #[serde(default)]
+    pub loading: bool,
+    #[serde(default)]
+    pub playback_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -114,6 +118,8 @@ pub struct ObservedPlaybackState {
     pub position_seconds: Option<f64>,
     pub metadata: HashMap<String, String>,
     pub normalized_metadata: MediaMetadata,
+    pub loading: bool,
+    pub playback_error: Option<String>,
     last_checkpoint_position_seconds: Option<f64>,
 }
 
@@ -133,6 +139,7 @@ struct MpvEventMessage {
     name: Option<String>,
     data: Option<Value>,
     reason: Option<String>,
+    file_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -361,8 +368,15 @@ pub fn register_playback_request(
     state.current_source_url = None;
     state.current_play_url = None;
     state.current_source = None;
+    state.path = None;
+    state.media_title = None;
+    state.duration_seconds = None;
+    state.position_seconds = None;
+    state.metadata.clear();
     state.normalized_metadata = MediaMetadata::default();
     state.last_checkpoint_position_seconds = None;
+    state.loading = true;
+    state.playback_error = None;
     state.pending.push_back(PendingPlayback {
         source_url,
         play_url,
@@ -380,7 +394,14 @@ pub fn rollback_playback_request(state: &SharedPlaybackState, play_url: &str) {
         .rposition(|pending| pending.play_url == play_url)
     {
         state.pending.remove(index);
+        state.loading = !state.pending.is_empty();
     }
+}
+
+pub fn cancel_pending_playback(state: &SharedPlaybackState) {
+    let mut state = state.lock().expect("playback state lock poisoned");
+    state.pending.clear();
+    state.loading = false;
 }
 
 pub fn observed_status(state: &SharedPlaybackState, loop_status: Option<LoopStatus>) -> MpvStatus {
@@ -396,15 +417,25 @@ pub fn observed_status(state: &SharedPlaybackState, loop_status: Option<LoopStat
         album: state.normalized_metadata.album.clone(),
         duration_seconds: state.duration_seconds,
         position_seconds: state.position_seconds,
-        source_url: state.current_source_url.clone(),
+        source_url: state.current_source_url.clone().or_else(|| {
+            state
+                .pending
+                .front()
+                .map(|pending| pending.source_url.clone())
+        }),
         playback_path: state.current_play_url.clone(),
         loop_status,
         resume_available: false,
+        loading: state.loading,
+        playback_error: state.playback_error.clone(),
     }
 }
 
 pub fn current_playback_checkpoint(state: &SharedPlaybackState) -> Option<(String, f64)> {
     let state = state.lock().expect("playback state lock poisoned");
+    if state.loading || state.playback_error.is_some() {
+        return None;
+    }
     let source_url = state.current_source_url.clone()?;
     let position_seconds = state.position_seconds?;
     (position_seconds.is_finite() && position_seconds >= 0.0)
@@ -493,13 +524,12 @@ fn observe_events(
     // A file can finish loading before the observer has registered, or while it
     // is reconnecting. Reconcile the snapshot so its pending request is not
     // permanently omitted from history.
-    match MpvClient::connect(socket_path).and_then(|mut client| client.metadata_snapshot()) {
-        Ok(snapshot) if snapshot.idle_active != Some(true) && snapshot.path.is_some() => {
-            if let Some(position) = handle_file_loaded(snapshot, database, state)? {
-                MpvClient::connect(socket_path)?.seek(position, false)?;
-            }
-        }
-        Ok(_) => {}
+    match MpvClient::connect(socket_path)
+        .and_then(|mut client| client.metadata_snapshot())
+        .and_then(|snapshot| reconcile_snapshot(snapshot, database, state))
+    {
+        Ok(Some(position)) => MpvClient::connect(socket_path)?.seek(position, false)?,
+        Ok(None) => {}
         Err(error) => warn!(error = %error, "failed to reconcile mpv state"),
     }
 
@@ -572,7 +602,17 @@ fn handle_observer_line(
             if event.reason.as_deref() == Some("eof") {
                 database.clear_resume_checkpoint()?;
             }
-            handle_end_file(state);
+            let playback_error = (event.reason.as_deref() == Some("error")).then(|| {
+                event
+                    .file_error
+                    .as_deref()
+                    .and_then(clean_str)
+                    .unwrap_or_else(|| "mpv could not load or play the media".to_string())
+            });
+            if let Some(file_error) = &playback_error {
+                warn!(reason = "error", file_error = %file_error, "playback failed");
+            }
+            handle_end_file(state, playback_error);
             Ok(())
         }
         Some("shutdown") => bail!("mpv shutdown event received"),
@@ -584,6 +624,33 @@ fn should_preserve_looped_file(reason: Option<&str>, loop_status: Option<&LoopSt
     reason == Some("eof") && loop_status == Some(&LoopStatus::One)
 }
 
+fn reconcile_snapshot(
+    snapshot: MetadataSnapshot,
+    database: &Database,
+    state: &SharedPlaybackState,
+) -> Result<Option<f64>> {
+    // mpv exposes a path and a URL-derived title before the file has loaded.
+    // A playback position distinguishes a loaded file, including paused media.
+    if snapshot.idle_active == Some(true)
+        || snapshot.path.is_none()
+        || snapshot.position_seconds.is_none()
+    {
+        return Ok(None);
+    }
+    {
+        let state = state.lock().expect("playback state lock poisoned");
+        if state.loading
+            && !state.pending.iter().any(|pending| {
+                snapshot.path.as_deref() == Some(&pending.play_url)
+                    || snapshot.path.as_deref() == Some(&pending.source_url)
+            })
+        {
+            return Ok(None);
+        }
+    }
+    handle_file_loaded(snapshot, database, state)
+}
+
 fn handle_file_loaded(
     snapshot: MetadataSnapshot,
     database: &Database,
@@ -592,6 +659,8 @@ fn handle_file_loaded(
     let (pending, source_url, metadata, checkpoint_position, resume_position) = {
         let mut state = state.lock().expect("playback state lock poisoned");
         apply_snapshot(&mut state, snapshot);
+        state.loading = false;
+        state.playback_error = None;
         let pending = take_matching_pending(&mut state);
         if let Some(pending) = &pending {
             state.current_source_url = Some(pending.source_url.clone());
@@ -667,6 +736,9 @@ fn save_current_checkpoint_if_due(database: &Database, state: &SharedPlaybackSta
 
     let checkpoint = {
         let mut state = state.lock().expect("playback state lock poisoned");
+        if state.loading || state.playback_error.is_some() {
+            return Ok(());
+        }
         let Some(source_url) = state.current_source_url.clone() else {
             return Ok(());
         };
@@ -729,9 +801,22 @@ fn handle_property_change(event: MpvEventMessage, state: &SharedPlaybackState) -
     metadata_changed
 }
 
-fn handle_end_file(state: &SharedPlaybackState) {
+fn handle_end_file(state: &SharedPlaybackState, playback_error: Option<String>) {
     let mut state = state.lock().expect("playback state lock poisoned");
-    state.current_source_url = None;
+    let failed_source_url = playback_error.as_ref().and_then(|_| {
+        state
+            .pending
+            .front()
+            .map(|pending| pending.source_url.clone())
+            .or_else(|| state.current_source_url.clone())
+    });
+    if playback_error.is_some() {
+        state.pending.clear();
+    }
+    // Replacing a track ends the old file before the new request starts.
+    state.loading = !state.pending.is_empty();
+    state.playback_error = playback_error;
+    state.current_source_url = failed_source_url;
     state.current_play_url = None;
     state.current_source = None;
     state.path = None;
@@ -769,6 +854,10 @@ fn take_matching_pending(state: &mut ObservedPlaybackState) -> Option<PendingPla
 }
 
 fn refresh_normalized_metadata(state: &mut ObservedPlaybackState) {
+    if state.loading || state.playback_error.is_some() {
+        state.normalized_metadata = MediaMetadata::default();
+        return;
+    }
     let mut metadata = normalize_metadata(
         state.current_source_url.as_deref(),
         state.path.as_deref(),
@@ -1301,6 +1390,231 @@ mod tests {
     }
 
     #[test]
+    fn older_status_responses_default_to_no_loading_or_error() {
+        let status: MpvStatus = serde_json::from_value(json!({
+            "pause": false,
+            "idle_active": false,
+            "path": "https://youtu.be/example"
+        }))
+        .expect("parse older peer status");
+
+        assert!(!status.loading);
+        assert_eq!(status.playback_error, None);
+    }
+
+    #[test]
+    fn pending_request_reports_loading_before_mpv_changes_properties() {
+        let state = shared_playback_state();
+        state.lock().expect("state lock").idle_active = Some(true);
+        register_playback_request(
+            &state,
+            "https://youtu.be/example".to_string(),
+            "https://youtu.be/example".to_string(),
+            None,
+            None,
+            true,
+        );
+        handle_property_change(
+            event_fixture(OBSERVE_MEDIA_TITLE, "media-title", json!("example")),
+            &state,
+        );
+
+        let status = observed_status(&state, None);
+        assert!(status.loading);
+        assert_eq!(
+            status.source_url.as_deref(),
+            Some("https://youtu.be/example")
+        );
+        assert_eq!(status.title, None);
+        assert_eq!(status.position_seconds, None);
+        assert_eq!(current_playback_checkpoint(&state), None);
+
+        rollback_playback_request(&state, "https://youtu.be/example");
+        assert!(!observed_status(&state, None).loading);
+    }
+
+    #[test]
+    fn reconciliation_does_not_mistake_loading_or_an_old_track_for_a_loaded_request() {
+        let path = unique_db_path("loading-snapshot");
+        let database = Database::open(path.clone()).expect("open database");
+        let state = shared_playback_state();
+        register_playback_request(
+            &state,
+            "https://youtu.be/example".to_string(),
+            "https://youtu.be/example".to_string(),
+            None,
+            None,
+            true,
+        );
+
+        for snapshot in [
+            MetadataSnapshot {
+                path: Some("https://youtu.be/example".to_string()),
+                media_title: Some("example".to_string()),
+                idle_active: Some(false),
+                ..MetadataSnapshot::default()
+            },
+            MetadataSnapshot {
+                path: Some("https://youtu.be/previous".to_string()),
+                idle_active: Some(false),
+                position_seconds: Some(42.0),
+                ..MetadataSnapshot::default()
+            },
+        ] {
+            reconcile_snapshot(snapshot, &database, &state).expect("reconcile loading snapshot");
+            assert!(observed_status(&state, None).loading);
+            assert!(database.history().expect("history").is_empty());
+            assert!(database.resume_checkpoint().expect("checkpoint").is_none());
+        }
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn asynchronous_load_failure_keeps_reason_and_source_without_recording_a_play() {
+        let path = unique_db_path("failed-load");
+        let database = Database::open(path.clone()).expect("open database");
+        database
+            .save_resume_checkpoint("https://youtu.be/previous", 42.0)
+            .expect("save old checkpoint");
+        let state = shared_playback_state();
+
+        for (event, expected_error) in [
+            (
+                r#"{"event":"end-file","reason":"error","file_error":"loading failed"}"#,
+                "loading failed",
+            ),
+            (
+                r#"{"event":"end-file","reason":"error"}"#,
+                "mpv could not load or play the media",
+            ),
+            (
+                r#"{"event":"end-file","reason":"error","file_error":"  "}"#,
+                "mpv could not load or play the media",
+            ),
+        ] {
+            register_playback_request(
+                &state,
+                "https://youtu.be/example".to_string(),
+                "https://youtu.be/example".to_string(),
+                None,
+                None,
+                true,
+            );
+            assert_eq!(observed_status(&state, None).playback_error, None);
+            handle_observer_line(event, Path::new("/tmp/missing.sock"), &database, &state)
+                .expect("handle load failure");
+            handle_observer_line(
+                r#"{"event":"property-change","id":7,"name":"time-pos","data":5.0}"#,
+                Path::new("/tmp/missing.sock"),
+                &database,
+                &state,
+            )
+            .expect("handle late property event");
+
+            let status = observed_status(&state, None);
+            assert!(!status.loading);
+            assert_eq!(status.playback_error.as_deref(), Some(expected_error));
+            assert_eq!(
+                status.source_url.as_deref(),
+                Some("https://youtu.be/example")
+            );
+            assert_eq!(status.title, None);
+            assert!(state.lock().expect("state lock").pending.is_empty());
+            assert_eq!(current_playback_checkpoint(&state), None);
+            assert!(database.history().expect("history").is_empty());
+            let checkpoint = database
+                .resume_checkpoint()
+                .expect("checkpoint")
+                .expect("saved");
+            assert_eq!(checkpoint.source_url, "https://youtu.be/previous");
+            assert_eq!(checkpoint.position_seconds, 42.0);
+        }
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn playback_failure_after_loading_preserves_its_checkpoint_and_clears_on_retry() {
+        let path = unique_db_path("failed-playback");
+        let database = Database::open(path.clone()).expect("open database");
+        let state = shared_playback_state();
+        register_playback_request(
+            &state,
+            "https://youtu.be/example".to_string(),
+            "https://youtu.be/example".to_string(),
+            None,
+            None,
+            true,
+        );
+        handle_file_loaded(
+            MetadataSnapshot {
+                path: Some("https://youtu.be/example".to_string()),
+                position_seconds: Some(12.0),
+                ..MetadataSnapshot::default()
+            },
+            &database,
+            &state,
+        )
+        .expect("load track");
+        handle_observer_line(
+            r#"{"event":"end-file","reason":"error","file_error":"audio output initialization failed"}"#,
+            Path::new("/tmp/missing.sock"),
+            &database,
+            &state,
+        )
+        .expect("handle playback failure");
+
+        let status = observed_status(&state, None);
+        assert_eq!(
+            status.source_url.as_deref(),
+            Some("https://youtu.be/example")
+        );
+        assert!(status.playback_error.is_some());
+        assert_eq!(
+            database
+                .resume_checkpoint()
+                .expect("checkpoint")
+                .expect("saved")
+                .position_seconds,
+            12.0
+        );
+        assert_eq!(database.history().expect("history").len(), 1);
+
+        register_playback_request(
+            &state,
+            "https://youtu.be/retry".to_string(),
+            "https://youtu.be/retry".to_string(),
+            None,
+            None,
+            true,
+        );
+        let status = observed_status(&state, None);
+        assert!(status.loading);
+        assert_eq!(status.playback_error, None);
+        assert_eq!(status.source_url.as_deref(), Some("https://youtu.be/retry"));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn replacing_a_file_preserves_loading_but_cancelling_it_clears_pending() {
+        let state = shared_playback_state();
+        register_playback_request(
+            &state,
+            "https://youtu.be/replacement".to_string(),
+            "https://youtu.be/replacement".to_string(),
+            None,
+            None,
+            true,
+        );
+        handle_end_file(&state, None);
+        assert!(observed_status(&state, None).loading);
+
+        cancel_pending_playback(&state);
+        handle_end_file(&state, None);
+        assert!(!observed_status(&state, None).loading);
+        assert!(state.lock().expect("state lock").pending.is_empty());
+    }
+
+    #[test]
     fn latest_playback_request_replaces_an_earlier_pending_request() {
         let path = unique_db_path("replaced-pending-track");
         let database = Database::open(path.clone()).expect("open database");
@@ -1338,6 +1652,8 @@ mod tests {
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].source_url, "https://youtu.be/second");
         assert_eq!(history[0].title.as_deref(), Some("Second song"));
+        assert!(!observed_status(&state, None).loading);
+        assert_eq!(observed_status(&state, None).playback_error, None);
 
         let _ = fs::remove_file(path);
     }
@@ -1359,11 +1675,13 @@ mod tests {
             path: Some("https://youtu.be/example".to_string()),
             media_title: Some("Example song".to_string()),
             idle_active: Some(false),
+            position_seconds: Some(0.0),
             ..MetadataSnapshot::default()
         };
 
-        handle_file_loaded(snapshot.clone(), &database, &state).expect("initial file load");
-        handle_file_loaded(snapshot, &database, &state).expect("reconciled file load");
+        reconcile_snapshot(snapshot.clone(), &database, &state).expect("initial reconciliation");
+        reconcile_snapshot(snapshot, &database, &state).expect("reconciled file load");
+        assert!(!observed_status(&state, None).loading);
 
         assert_eq!(database.history().expect("read history").len(), 1);
         let _ = fs::remove_file(path);
@@ -1432,7 +1750,7 @@ mod tests {
             &state,
         )
         .expect("initial load");
-        handle_end_file(&state);
+        handle_end_file(&state, None);
 
         register_playback_request(
             &state,
@@ -1565,7 +1883,7 @@ mod tests {
             &state,
         );
 
-        handle_end_file(&state);
+        handle_end_file(&state, None);
 
         let state = state.lock().expect("state lock");
         assert_eq!(state.normalized_metadata.title, None);
@@ -1618,6 +1936,7 @@ mod tests {
             name: Some(name.to_string()),
             data: Some(data),
             reason: None,
+            file_error: None,
         }
     }
 

@@ -160,6 +160,14 @@ GET  /v1/history
 `POST /v1/seek` accepts finite `seconds` and `relative` fields. Resume and seek
 terminate at the receiving node like all other peer playback operations.
 
+Status responses include `loading` (boolean) and `playback_error` (nullable
+string). Loading begins when a play or resume load is registered and ends on
+`file-loaded` or failure/cancellation. `source_url` identifies the pending or
+failed request as well as loaded media. An asynchronous playback failure stays
+visible instead of being replaced with an older resume checkpoint. These fields
+are additive; clients default missing fields from older peers to `false` and
+`null` respectively.
+
 Pairing routes are available without bearer authentication only while a pairing
 session is active:
 
@@ -225,9 +233,19 @@ On `file-loaded`, ura associates the loaded item with a pending play or resume
 request. New plays are recorded in history; resume requests retain the existing
 history event and seek after the file has loaded. The observer also reconciles
 mpv's current structured-property snapshot when it connects, so a load completed
-during observer startup or reconnection is not omitted. Later property changes
-can enrich the same current-track metadata. Human-readable mpv logs are not
-parsed for runtime state.
+during observer startup or reconnection is not omitted. Reconciliation requires
+a playback position, not just a path or title: mpv exposes URL-derived values
+before loading completes. A snapshot of a previous track must not consume a new
+pending request. Later property changes can enrich the same current-track
+metadata; URL-derived metadata during loading is not treated as a track title.
+
+An `end-file` event with `reason=error` retains its structured `file_error` as
+`playback_error`, logs the failure at warning level, and clears the failed
+pending request without recording a successful load or erasing the saved resume
+checkpoint. A generic failure message is used if mpv omits `file_error`. A new
+play or resume load clears the error. Stop can cancel a pending load; resume does
+not interrupt one and seek requires loaded media. Human-readable mpv logs are
+not parsed for runtime state.
 
 ## SQLite
 

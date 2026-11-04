@@ -21,8 +21,9 @@ use crate::config::{
 use crate::db::{Database, HistoryEntry, ResumeCheckpoint, authorize_client};
 use crate::media_url;
 use crate::mpv::{
-    LoopMode, MpvClient, MpvEventObserver, SharedPlaybackState, current_playback_checkpoint,
-    observed_status, register_playback_request, rollback_playback_request, shared_playback_state,
+    LoopMode, MpvClient, MpvEventObserver, SharedPlaybackState, cancel_pending_playback,
+    current_playback_checkpoint, observed_status, register_playback_request,
+    rollback_playback_request, shared_playback_state,
 };
 use crate::pairing::{ClaimDecision, PairingManager, PairingStatus};
 use crate::playback_runtime::{
@@ -387,16 +388,22 @@ async fn pause_playback(state: AppState) -> std::result::Result<(), AppError> {
 }
 
 async fn stop_playback(state: AppState) -> std::result::Result<(), AppError> {
-    if !has_active_playback(&state.playback_state) {
+    let status = observed_status(&state.playback_state, None);
+    if !status.loading && !status_has_active_playback(&status) {
         return Ok(());
     }
 
     save_current_checkpoint(&state).await?;
-    run_mpv_command(state, |client| client.stop()).await
+    run_mpv_command(state.clone(), |client| client.stop()).await?;
+    cancel_pending_playback(&state.playback_state);
+    Ok(())
 }
 
 async fn resume_playback(state: AppState) -> std::result::Result<(), AppError> {
     let status = observed_status(&state.playback_state, None);
+    if status.loading {
+        return Ok(());
+    }
     if status_has_active_playback(&status) {
         if status.pause == Some(true) {
             run_mpv_command(state, |client| client.resume()).await?;
@@ -447,7 +454,9 @@ fn has_active_playback(state: &SharedPlaybackState) -> bool {
 }
 
 fn status_has_active_playback(status: &crate::mpv::MpvStatus) -> bool {
-    status.idle_active != Some(true)
+    !status.loading
+        && status.playback_error.is_none()
+        && status.idle_active != Some(true)
         && (status.path.is_some() || status.source_url.is_some() || status.media_title.is_some())
 }
 
@@ -476,7 +485,9 @@ async fn status(
         .await
         .ok();
     let mut status = observed_status(&state.playback_state, loop_status);
-    if !status_has_active_playback(&status)
+    if !status.loading
+        && status.playback_error.is_none()
+        && !status_has_active_playback(&status)
         && let Some(checkpoint) =
             run_db_command(state, |database| database.resume_checkpoint()).await?
     {
@@ -847,6 +858,123 @@ mod tests {
         assert_eq!(status.uploader.as_deref(), Some("Example artist"));
         assert_eq!(status.position_seconds, Some(42.0));
         assert_eq!(status.duration_seconds, Some(300.0));
+        let _ = fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn loading_and_failure_status_are_not_hidden_by_an_older_checkpoint() {
+        let (state, db_path) = test_state();
+        state
+            .database
+            .save_resume_checkpoint("https://youtu.be/previous", 42.0)
+            .expect("save old checkpoint");
+        register_playback_request(
+            &state.playback_state,
+            "https://youtu.be/example".to_string(),
+            "https://youtu.be/example".to_string(),
+            None,
+            None,
+            true,
+        );
+
+        let Json(loading) = status(State(state.clone())).await.expect("loading status");
+        assert!(loading.loading);
+        assert!(!loading.resume_available);
+        assert_eq!(
+            loading.source_url.as_deref(),
+            Some("https://youtu.be/example")
+        );
+        assert!(!status_has_active_playback(&loading));
+
+        {
+            let mut playback = state.playback_state.lock().expect("state lock");
+            playback.loading = false;
+            playback.playback_error = Some("loading failed".to_string());
+        }
+        let Json(failed) = status(State(state)).await.expect("failure status");
+        assert_eq!(failed.playback_error.as_deref(), Some("loading failed"));
+        assert!(!failed.resume_available);
+        assert_eq!(
+            failed.source_url.as_deref(),
+            Some("https://youtu.be/example")
+        );
+        assert!(!status_has_active_playback(&failed));
+        let _ = fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn loading_cannot_be_sought_or_interrupted_by_resume() {
+        let (state, db_path) = test_state();
+        register_playback_request(
+            &state.playback_state,
+            "https://youtu.be/example".to_string(),
+            "https://youtu.be/example".to_string(),
+            None,
+            None,
+            true,
+        );
+        let error = seek(
+            State(state.clone()),
+            Json(SeekRequest {
+                seconds: 10.0,
+                relative: false,
+            }),
+        )
+        .await
+        .expect_err("loading seek should fail without contacting mpv");
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        resume_playback(state.clone())
+            .await
+            .expect("resume leaves pending load alone");
+        assert!(observed_status(&state.playback_state, None).loading);
+        let _ = fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn stop_cancels_loading_even_before_mpv_publishes_a_path() {
+        use std::io::{BufRead, BufReader};
+
+        let (mut state, db_path) = test_state();
+        let socket_path = unique_path("loading-stop.sock");
+        let listener = UnixListener::bind(&socket_path).expect("bind fake mpv");
+        state.socket_path = Arc::new(socket_path.clone());
+        register_playback_request(
+            &state.playback_state,
+            "https://youtu.be/example".to_string(),
+            "https://youtu.be/example".to_string(),
+            None,
+            None,
+            true,
+        );
+        let mpv = tokio::task::spawn_blocking(move || {
+            let (mut stream, _) = listener.accept().expect("accept command");
+            let mut line = String::new();
+            BufReader::new(stream.try_clone().expect("clone stream"))
+                .read_line(&mut line)
+                .expect("read stop");
+            let request: serde_json::Value = serde_json::from_str(&line).expect("parse stop");
+            assert_eq!(request["command"], serde_json::json!(["stop"]));
+            writeln!(
+                stream,
+                "{}",
+                serde_json::json!({
+                    "request_id": request["request_id"], "error": "success"
+                })
+            )
+            .expect("reply to stop");
+        });
+
+        stop_playback(state.clone()).await.expect("stop loading");
+        mpv.await.expect("join fake mpv");
+        assert!(!observed_status(&state.playback_state, None).loading);
+        assert!(
+            state
+                .database
+                .resume_checkpoint()
+                .expect("checkpoint")
+                .is_none()
+        );
+        let _ = fs::remove_file(socket_path);
         let _ = fs::remove_file(db_path);
     }
 

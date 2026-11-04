@@ -421,6 +421,23 @@ fn print_status(status: &MpvStatus) {
 }
 
 fn render_status(status: &MpvStatus, color: bool) -> String {
+    if let Some(error) = &status.playback_error {
+        let mut output = format!("{}\n\n{error}\n", styled("! ERROR", "1;31", color));
+        if let Some(source_url) = &status.source_url {
+            output.push_str(&format!("\nSource {}\n", shorten_source(source_url)));
+        }
+        return output;
+    }
+    if status.loading {
+        let mut output = format!(
+            "{}\n\nResolving media and opening audio...\n",
+            styled("… LOADING", "1;33", color)
+        );
+        if let Some(source_url) = &status.source_url {
+            output.push_str(&format!("\nSource {}\n", shorten_source(source_url)));
+        }
+        return output;
+    }
     if status.resume_available {
         return render_stopped_status(status, color);
     }
@@ -730,6 +747,8 @@ mod tests {
             playback_path: Some("https://example.test/playback".to_string()),
             loop_status: Some(LoopStatus::One),
             resume_available: false,
+            loading: false,
+            playback_error: None,
         }
     }
 
@@ -778,6 +797,46 @@ mod tests {
         };
 
         assert_eq!(display_title(&status), "Unknown title");
+    }
+
+    #[test]
+    fn loading_status_does_not_claim_to_play_or_show_a_url_derived_title() {
+        let status = MpvStatus {
+            loading: true,
+            idle_active: Some(true),
+            media_title: Some("watch?v=example".to_string()),
+            title: Some("watch?v=example".to_string()),
+            resume_available: true,
+            ..status_fixture()
+        };
+
+        let output = render_status(&status, false);
+
+        assert!(output.starts_with("… LOADING\n"));
+        assert!(output.contains("Source youtu.be/example\n"));
+        assert!(!output.contains("PLAYING"));
+        assert!(!output.contains("STOPPED"));
+        assert!(!output.contains("watch?v="));
+        assert!(!output.contains("Time"));
+        assert!(!output.contains('●'));
+    }
+
+    #[test]
+    fn error_status_shows_the_failure_instead_of_a_saved_checkpoint() {
+        let status = MpvStatus {
+            playback_error: Some("loading failed".to_string()),
+            resume_available: true,
+            idle_active: Some(true),
+            ..status_fixture()
+        };
+
+        let output = render_status(&status, false);
+
+        assert!(output.starts_with("! ERROR\n\nloading failed\n"));
+        assert!(output.contains("Source youtu.be/example\n"));
+        assert!(!output.contains("PLAYING"));
+        assert!(!output.contains("STOPPED"));
+        assert!(!output.contains('●'));
     }
 
     #[test]
