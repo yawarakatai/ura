@@ -83,8 +83,22 @@ With the module enabled, the local ura node starts as a systemd user service, so
 playing a URL with `ura <URL>` does not require manually running `ura daemon`.
 
 The module installs ura and adds mpv and yt-dlp to the service PATH.
-`services.ura.package`, `services.ura.bind`, and `services.ura.logLevel` can be
-overridden.
+`services.ura.package`, `services.ura.ytDlpPackage`, `services.ura.bind`, and
+`services.ura.logLevel` can be overridden.
+
+YouTube changes regularly break older yt-dlp releases. To update yt-dlp without
+moving the nixpkgs revision ura is built from, take it from a separate input:
+
+```nix
+# flake inputs
+nixpkgs-ytdlp.url = "github:NixOS/nixpkgs/nixos-unstable";
+
+# Home Manager configuration
+services.ura.ytDlpPackage =
+  inputs.nixpkgs-ytdlp.legacyPackages.${pkgs.stdenv.hostPlatform.system}.yt-dlp;
+```
+
+Then `nix flake update nixpkgs-ytdlp` refreshes only yt-dlp.
 
 ## Local-Only Default
 

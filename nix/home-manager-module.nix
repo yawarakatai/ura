@@ -26,6 +26,17 @@ in
       description = "The ura package to use.";
     };
 
+    ytDlpPackage = lib.mkOption {
+      type = lib.types.package;
+      default = pkgs.yt-dlp;
+      defaultText = lib.literalExpression "pkgs.yt-dlp";
+      description = ''
+        The yt-dlp package mpv uses to resolve media URLs. YouTube changes often
+        break older yt-dlp releases, so this can track a separately updated
+        nixpkgs input without rebuilding ura.
+      '';
+    };
+
     bind = lib.mkOption {
       type = lib.types.str;
       default = "127.0.0.1:8765";
@@ -66,7 +77,7 @@ in
           "PATH=${
             lib.makeBinPath [
               mpvWithMpris
-              pkgs.yt-dlp
+              cfg.ytDlpPackage
             ]
           }"
         ];
