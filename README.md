@@ -114,8 +114,8 @@ $ ura stop
 $ ura resume
 ```
 
-To loop by default, set `default_loop = true` in `config.toml`. Use
-`--no-loop` to play once.
+To loop by default, set `default_loop = true` in `settings.toml` next to
+`config.toml`. Use `--no-loop` to play once.
 
 Running `ura` without a URL or command shows the selected device's status:
 

@@ -44,6 +44,16 @@ in
       description = "Address and port on which ura accepts peer connections.";
     };
 
+    defaultLoop = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = ''
+        Loop played tracks by default; `--no-loop` plays once. Written to
+        settings.toml, which ura only reads, unlike the config.toml it rewrites
+        when pairing.
+      '';
+    };
+
     logLevel = lib.mkOption {
       type = lib.types.str;
       default = "ura=info";
@@ -55,6 +65,10 @@ in
     home.packages = [
       cfg.package
     ];
+
+    xdg.configFile."ura/settings.toml" = lib.mkIf cfg.defaultLoop {
+      text = "default_loop = true\n";
+    };
 
     systemd.user.services.ura = {
       Unit = {

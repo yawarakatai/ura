@@ -86,6 +86,10 @@ The module installs ura and adds mpv and yt-dlp to the service PATH.
 `services.ura.package`, `services.ura.ytDlpPackage`, `services.ura.bind`, and
 `services.ura.logLevel` can be overridden.
 
+`services.ura.defaultLoop = true` writes `~/.config/ura/settings.toml` with
+`default_loop = true`. `config.toml` is not managed because ura rewrites it when
+pairing or selecting a device.
+
 YouTube changes regularly break older yt-dlp releases. To update yt-dlp without
 moving the nixpkgs revision ura is built from, take it from a separate input:
 

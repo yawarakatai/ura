@@ -99,9 +99,11 @@ A bare URL plays immediately, while `--loop` starts it with current-track
 looping enabled. A normal play request disables an earlier track loop, so
 looping does not leak into later playback.
 
-Setting `default_loop = true` in `config.toml` makes play and `history <N>`
+Setting `default_loop = true` in `settings.toml` makes play and `history <N>`
 commands loop by default; `--no-loop` plays once. The setting is read by the
-CLI on the initiating machine only.
+CLI on the initiating machine only. `settings.toml` holds user preferences and
+is never written by ura, unlike `config.toml`, which pairing and device
+selection rewrite; this lets Home Manager own it.
 
 Running `ura` without a URL or command shows status. `ura pause` is idempotent
 and keeps the media loaded. `ura resume` resumes paused media immediately, or
@@ -283,6 +285,10 @@ Plaintext issued tokens are not stored by the node that authorizes them.
 config:
   $XDG_CONFIG_HOME/ura/config.toml
   fallback: ~/.config/ura/config.toml
+
+settings (read-only):
+  $XDG_CONFIG_HOME/ura/settings.toml
+  fallback: ~/.config/ura/settings.toml
 
 database:
   $XDG_DATA_HOME/ura/ura.db

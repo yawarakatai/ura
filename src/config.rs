@@ -31,7 +31,6 @@ pub struct NodeConfig {
 #[derive(Debug, Default, Deserialize)]
 struct FileConfig {
     bind: Option<String>,
-    default_loop: Option<bool>,
     local: Option<FileLocal>,
     selected_device: Option<String>,
     devices: Option<Vec<FileDevice>>,
@@ -112,15 +111,28 @@ impl NodeConfig {
     }
 }
 
-/// Whether play commands loop the track unless `--no-loop` is given.
-pub fn default_loop() -> Result<bool> {
-    default_loop_from(None)
+/// User preferences live apart from `config.toml` because ura rewrites that
+/// file when pairing; this one is only ever read, so it can be nix-managed.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileSettings {
+    default_loop: Option<bool>,
 }
 
-fn default_loop_from(path: Option<&Path>) -> Result<bool> {
-    Ok(load_file_config(path)?
-        .and_then(|config| config.default_loop)
-        .unwrap_or(false))
+/// Whether play commands loop the track unless `--no-loop` is given.
+pub fn default_loop() -> Result<bool> {
+    default_loop_from(&settings_path()?)
+}
+
+fn default_loop_from(path: &Path) -> Result<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    let contents = fs::read_to_string(path)
+        .with_context(|| format!("failed to read settings file {}", path.display()))?;
+    let settings: FileSettings = toml::from_str(&contents)
+        .with_context(|| format!("failed to parse settings file {}", path.display()))?;
+    Ok(settings.default_loop.unwrap_or(false))
 }
 
 pub fn generate_token() -> Result<String> {
@@ -222,16 +234,23 @@ fn validate_host(host: &str) -> Result<()> {
 }
 
 pub fn config_path(path: Option<&Path>) -> Result<PathBuf> {
-    if let Some(path) = path {
-        return Ok(path.to_path_buf());
+    match path {
+        Some(path) => Ok(path.to_path_buf()),
+        None => Ok(config_dir()?.join("config.toml")),
     }
+}
 
+fn settings_path() -> Result<PathBuf> {
+    Ok(config_dir()?.join("settings.toml"))
+}
+
+fn config_dir() -> Result<PathBuf> {
     if let Some(config_home) = env::var_os("XDG_CONFIG_HOME") {
-        return Ok(PathBuf::from(config_home).join("ura/config.toml"));
+        return Ok(PathBuf::from(config_home).join("ura"));
     }
 
     let home = env::var_os("HOME").ok_or(UraError::MissingHome)?;
-    Ok(PathBuf::from(home).join(".config/ura/config.toml"))
+    Ok(PathBuf::from(home).join(".config/ura"))
 }
 
 pub fn default_bind() -> SocketAddr {
@@ -325,19 +344,21 @@ mod tests {
     }
 
     #[test]
-    fn default_loop_reads_config_and_defaults_to_off() {
-        let missing = unique_path("loop-missing");
-        assert!(!default_loop_from(Some(&missing)).expect("missing config"));
-
+    fn default_loop_reads_settings_and_defaults_to_off() {
         let path = unique_path("loop");
-        fs::write(&path, "bind = \"127.0.0.1:8765\"\n").expect("write config");
-        assert!(!default_loop_from(Some(&path)).expect("unset"));
+        assert!(!default_loop_from(&path).expect("missing settings"));
 
-        fs::write(&path, "default_loop = true\n").expect("write config");
-        assert!(default_loop_from(Some(&path)).expect("enabled"));
+        fs::write(&path, "").expect("write settings");
+        assert!(!default_loop_from(&path).expect("unset"));
 
-        fs::write(&path, "default_loop = \"yes\"\n").expect("write config");
-        default_loop_from(Some(&path)).expect_err("non-boolean is rejected");
+        fs::write(&path, "default_loop = true\n").expect("write settings");
+        assert!(default_loop_from(&path).expect("enabled"));
+
+        fs::write(&path, "default_loop = \"yes\"\n").expect("write settings");
+        default_loop_from(&path).expect_err("non-boolean is rejected");
+
+        fs::write(&path, "loop = true\n").expect("write settings");
+        default_loop_from(&path).expect_err("unknown key is rejected");
 
         let _ = fs::remove_file(path);
     }
