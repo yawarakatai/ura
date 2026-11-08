@@ -31,6 +31,7 @@ pub struct NodeConfig {
 #[derive(Debug, Default, Deserialize)]
 struct FileConfig {
     bind: Option<String>,
+    default_loop: Option<bool>,
     local: Option<FileLocal>,
     selected_device: Option<String>,
     devices: Option<Vec<FileDevice>>,
@@ -109,6 +110,13 @@ impl NodeConfig {
 
         Ok(Self { bind })
     }
+}
+
+/// Whether play commands loop the track unless `--no-loop` is given.
+pub fn default_loop() -> Result<bool> {
+    Ok(load_file_config(None)?
+        .and_then(|config| config.default_loop)
+        .unwrap_or(false))
 }
 
 pub fn generate_token() -> Result<String> {

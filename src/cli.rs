@@ -20,6 +20,10 @@ pub struct Cli {
     #[arg(short = 'l', long = "loop", requires = "url")]
     pub loop_track: bool,
 
+    /// Play once even if `default_loop` is enabled in config.
+    #[arg(long, requires = "url", conflicts_with = "loop_track")]
+    pub no_loop: bool,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -47,6 +51,10 @@ pub enum Command {
         /// Loop the history entry until another URL is played.
         #[arg(short = 'l', long = "loop", requires = "index")]
         loop_track: bool,
+
+        /// Play once even if `default_loop` is enabled in config.
+        #[arg(long, requires = "index", conflicts_with = "loop_track")]
+        no_loop: bool,
     },
     /// Choose and manage playback devices.
     #[command(disable_help_subcommand = true)]
@@ -233,6 +241,13 @@ mod tests {
             .expect_err("root options should conflict with subcommands");
         Cli::try_parse_from(["ura", "history", "--loop"])
             .expect_err("history loop requires an entry number");
+        Cli::try_parse_from(["ura", "--no-loop"]).expect_err("no-loop requires a URL");
+        Cli::try_parse_from(["ura", "https://youtu.be/example", "--loop", "--no-loop"])
+            .expect_err("loop and no-loop conflict");
+        Cli::try_parse_from(["ura", "https://youtu.be/example", "--no-loop"])
+            .expect("no-loop should parse");
+        Cli::try_parse_from(["ura", "history", "3", "--no-loop"])
+            .expect("history no-loop should parse");
     }
 
     #[test]

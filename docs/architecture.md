@@ -99,6 +99,10 @@ A bare URL plays immediately, while `--loop` starts it with current-track
 looping enabled. A normal play request disables an earlier track loop, so
 looping does not leak into later playback.
 
+Setting `default_loop = true` in `config.toml` makes play and `history <N>`
+commands loop by default; `--no-loop` plays once. The setting is read by the
+CLI on the initiating machine only.
+
 Running `ura` without a URL or command shows status. `ura pause` is idempotent
 and keeps the media loaded. `ura resume` resumes paused media immediately, or
 reloads stopped media from its persisted checkpoint. `ura stop` preserves that

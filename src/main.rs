@@ -33,11 +33,12 @@ async fn main() -> Result<()> {
     let Cli {
         url,
         loop_track,
+        no_loop,
         command,
     } = Cli::parse();
 
     match command {
-        None => run_default(url, loop_track),
+        None => run_default(url, loop_track, no_loop),
         Some(Command::Pause) => {
             NodeClient::new()?.control("pause")?;
             println!("pause: sent");
@@ -58,7 +59,11 @@ async fn main() -> Result<()> {
             println!("seek: sent");
             Ok(())
         }
-        Some(Command::History { index, loop_track }) => run_history_command(index, loop_track),
+        Some(Command::History {
+            index,
+            loop_track,
+            no_loop,
+        }) => run_history_command(index, loop_track, no_loop),
         Some(Command::Device { command }) => run_device_command(command),
         Some(Command::Pair {
             address,
@@ -79,11 +84,18 @@ async fn main() -> Result<()> {
     }
 }
 
-fn run_default(url: Option<String>, loop_track: bool) -> Result<()> {
+fn resolve_loop(loop_track: bool, no_loop: bool) -> Result<bool> {
+    if loop_track || no_loop {
+        return Ok(loop_track);
+    }
+    ura::config::default_loop()
+}
+
+fn run_default(url: Option<String>, loop_track: bool, no_loop: bool) -> Result<()> {
     let client = NodeClient::new()?;
     match url {
         Some(url) => {
-            client.play_with_loop(&url, loop_track)?;
+            client.play_with_loop(&url, resolve_loop(loop_track, no_loop)?)?;
             println!("play: sent {url}");
         }
         None => print_status(&client.status()?),
@@ -91,7 +103,7 @@ fn run_default(url: Option<String>, loop_track: bool) -> Result<()> {
     Ok(())
 }
 
-fn run_history_command(index: Option<NonZeroUsize>, loop_track: bool) -> Result<()> {
+fn run_history_command(index: Option<NonZeroUsize>, loop_track: bool, no_loop: bool) -> Result<()> {
     let client = NodeClient::new()?;
     let history = client.history()?;
     let Some(index) = index else {
@@ -102,7 +114,7 @@ fn run_history_command(index: Option<NonZeroUsize>, loop_track: bool) -> Result<
     let index = index.get();
     let entry = history_entry(&history, index)?;
     let title = entry.title.as_deref().unwrap_or("Unknown title");
-    client.play_with_loop(&entry.source_url, loop_track)?;
+    client.play_with_loop(&entry.source_url, resolve_loop(loop_track, no_loop)?)?;
     println!("history #{index}: sent {title}");
     Ok(())
 }
