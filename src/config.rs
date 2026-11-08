@@ -114,7 +114,11 @@ impl NodeConfig {
 
 /// Whether play commands loop the track unless `--no-loop` is given.
 pub fn default_loop() -> Result<bool> {
-    Ok(load_file_config(None)?
+    default_loop_from(None)
+}
+
+fn default_loop_from(path: Option<&Path>) -> Result<bool> {
+    Ok(load_file_config(path)?
         .and_then(|config| config.default_loop)
         .unwrap_or(false))
 }
@@ -318,6 +322,24 @@ mod tests {
                 .bind,
             default_bind()
         );
+    }
+
+    #[test]
+    fn default_loop_reads_config_and_defaults_to_off() {
+        let missing = unique_path("loop-missing");
+        assert!(!default_loop_from(Some(&missing)).expect("missing config"));
+
+        let path = unique_path("loop");
+        fs::write(&path, "bind = \"127.0.0.1:8765\"\n").expect("write config");
+        assert!(!default_loop_from(Some(&path)).expect("unset"));
+
+        fs::write(&path, "default_loop = true\n").expect("write config");
+        assert!(default_loop_from(Some(&path)).expect("enabled"));
+
+        fs::write(&path, "default_loop = \"yes\"\n").expect("write config");
+        default_loop_from(Some(&path)).expect_err("non-boolean is rejected");
+
+        let _ = fs::remove_file(path);
     }
 
     #[test]
