@@ -2,11 +2,6 @@
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixpkgs-unstable";
     flake-parts.url = "github:hercules-ci/flake-parts";
-
-    fenix = {
-      url = "github:nix-community/fenix";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
   };
 
   outputs =
@@ -27,28 +22,9 @@
       };
 
       perSystem =
-        {
-          pkgs,
-          inputs',
-          ...
-        }:
+        { pkgs, ... }:
         let
-          fenixPkgs = inputs'.fenix.packages;
-
-          rustToolchain = fenixPkgs.stable.withComponents [
-            "cargo"
-            "clippy"
-            "rust-src"
-            "rustc"
-            "rustfmt"
-          ];
-
-          rustPlatform = pkgs.makeRustPlatform {
-            cargo = fenixPkgs.stable.cargo;
-            rustc = fenixPkgs.stable.rustc;
-          };
-
-          uraPackage = rustPlatform.buildRustPackage {
+          uraPackage = pkgs.rustPlatform.buildRustPackage {
             pname = "ura";
             version = "0.7.0";
 
@@ -56,6 +32,8 @@
 
             cargoLock.lockFile = ./Cargo.lock;
 
+            # nixpkgs' cargoUseSystemLibs links the system SQLite even with
+            # rusqlite's `bundled` feature.
             nativeBuildInputs = [
               pkgs.pkg-config
             ];
@@ -73,13 +51,18 @@
 
           devShells.default = pkgs.mkShell {
             packages = [
-              rustToolchain
-              fenixPkgs.stable.rust-analyzer
+              pkgs.cargo
+              pkgs.clippy
+              pkgs.rustc
+              pkgs.rustfmt
+              pkgs.rust-analyzer
 
               pkgs.mpv
               pkgs.sqlite
               pkgs.yt-dlp
             ];
+
+            RUST_SRC_PATH = pkgs.rustPlatform.rustLibSrc;
           };
         };
     };
